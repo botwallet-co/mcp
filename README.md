@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/botwallet-co/mcp?style=social)](https://github.com/botwallet-co/mcp)
 
-MCP server that gives AI agents the ability to hold, spend, and earn real money (USDC on Solana).
+An MCP server that lets AI agents hold, spend, and earn USDC on Solana.
 Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.
 
 [Website](https://botwallet.co) · [Dashboard](https://app.botwallet.co) · [Docs](https://docs.botwallet.co) · [CLI](https://github.com/botwallet-co/agent-cli) · [npm](https://www.npmjs.com/package/@botwallet/mcp)
@@ -17,7 +17,7 @@ Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible clien
 
 ---
 
-Add one JSON block. Your agent has a wallet with spending limits, human oversight, and FROST threshold signing.
+Add one JSON block to your MCP client config. That's it.
 
 ```json
 {
@@ -30,29 +30,32 @@ Add one JSON block. Your agent has a wallet with spending limits, human oversigh
 }
 ```
 
-Then ask your agent:
+Then tell your agent: *"Create a BotWallet for yourself."*
 
-> "Create a BotWallet for yourself"
+It runs `botwallet_register`, generates a cryptographic key share locally, and comes back with a deposit address. No setup, no API keys to configure beforehand.
 
-The agent runs `botwallet_register` — generates a FROST key share locally, completes distributed key generation with the server, and returns a deposit address. No pre-configuration needed.
+From there:
 
 > "Send $5 to @acme-bot for the data report"
 
-The agent checks affordability, creates a payment intent, FROST co-signs with the server, and submits to Solana. If the amount exceeds guard rails, it requests owner approval instead.
+If the amount is within guard rails, the agent signs and submits. If not, it asks the human owner for approval.
 
 > "Create an invoice for $25 for the consulting session"
 
-The agent creates a paylink and sends it to the client. When paid, the USDC lands in the agent's wallet.
+The agent creates a paylink. When someone pays it, the USDC goes straight to the wallet.
 
-**What agents can do with BotWallet:**
-- **Pay** other agents and merchants
-- **Earn** money via invoices and payment links
-- **Access paid APIs** through the [x402 protocol](https://www.x402.org/)
-- **Request funds** from a human owner
-- **Withdraw** USDC to any Solana address
-- **Manage** multiple wallets with spending guard rails
+> "Find a speech-to-text API and use it"
 
-Every transaction uses **FROST 2-of-2 threshold signing** — the agent holds one key share locally and the server holds the other. The full private key never exists anywhere. Human owners set guard rails (per-transaction limits, daily budgets, merchant allowlists) and approve anything outside the rules.
+The agent searches the x402 catalog, finds a paid API, pays for access, and returns the result.
+
+## How signing works
+
+Every wallet uses FROST 2-of-2 threshold signatures. During wallet creation, a key generation ceremony produces two shares:
+
+- **S1** — the agent's share, stored locally at `~/.botwallet/seeds/`
+- **S2** — the server's share, held by BotWallet
+
+The full private key never exists. Every transaction requires both parties to co-sign. Neither the agent nor BotWallet can move funds alone. Human owners set spending limits and approve anything outside the rules.
 
 ## Installation
 
@@ -60,8 +63,10 @@ Every transaction uses **FROST 2-of-2 threshold signing** — the agent holds on
 
 Add to `claude_desktop_config.json`:
 
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+| OS | Config path |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 
 ```json
 {
@@ -76,13 +81,13 @@ Add to `claude_desktop_config.json`:
 
 ### Cursor
 
-Open **Settings > MCP** and add a new server with the same configuration above.
+Open **Settings > MCP**, add a new server, paste the same JSON above.
 
-### Windsurf / Cline / Other MCP Clients
+### Windsurf / Cline / Other MCP clients
 
-Same configuration — add the `npx` command to your MCP server settings.
+Same JSON. Add the `npx` command to your MCP server settings.
 
-### Global Install (alternative)
+### Global install
 
 ```bash
 npm install -g @botwallet/mcp
@@ -90,103 +95,93 @@ npm install -g @botwallet/mcp
 
 Then use `botwallet-mcp` as the command instead of `npx -y @botwallet/mcp`.
 
-## Environment Variables
+## Environment variables
 
-| Variable | Description |
-|----------|-------------|
-| `BOTWALLET_API_KEY` | API key (alternative to config file) |
-| `BOTWALLET_WALLET` | Wallet name to use (alternative to default) |
-| `BOTWALLET_BASE_URL` | Custom API URL (default: `https://api.botwallet.co/v1`) |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BOTWALLET_API_KEY` | — | API key (alternative to config file) |
+| `BOTWALLET_WALLET` | — | Which wallet to use (if you have several) |
+| `BOTWALLET_BASE_URL` | `https://api.botwallet.co/v1` | Custom API endpoint |
 
-These are optional. The MCP server reads `~/.botwallet/config.json` (shared with the [CLI](https://github.com/botwallet-co/agent-cli)) and auto-detects configuration.
+All optional. The server reads `~/.botwallet/config.json` (shared with the [CLI](https://github.com/botwallet-co/agent-cli)) and figures out the rest.
 
-## Tools (36)
+## Tools
 
-### Wallet Management
-| Tool | Description |
+36 tools across 8 groups.
+
+### Wallet management
+| Tool | What it does |
 |------|-------------|
 | `botwallet_ping` | Check API connectivity |
-| `botwallet_register` | Create a new wallet (FROST DKG) |
+| `botwallet_register` | Create a new wallet (FROST key generation) |
 | `botwallet_info` | Wallet metadata and status |
-| `botwallet_balance` | Live on-chain balance and budget |
+| `botwallet_balance` | On-chain balance and remaining budget |
 | `botwallet_update_owner` | Set owner email |
-| `botwallet_rename` | Update display name |
+| `botwallet_rename` | Change display name |
 | `botwallet_wallet_list` | List local wallets |
 | `botwallet_wallet_use` | Switch active wallet |
 
-### Payments (Spending)
-| Tool | Description |
+### Payments
+| Tool | What it does |
 |------|-------------|
-| `botwallet_lookup` | Verify a recipient exists |
+| `botwallet_lookup` | Check if a recipient exists |
 | `botwallet_can_i_afford` | Pre-flight check before paying |
-| `botwallet_pay` | Pay a merchant or bot (auto-signs if pre-approved) |
-| `botwallet_confirm_payment` | Complete an owner-approved payment |
-| `botwallet_list_payments` | List outgoing payment intents |
+| `botwallet_pay` | Pay someone (auto-signs if within limits) |
+| `botwallet_confirm_payment` | Complete a payment after owner approval |
+| `botwallet_list_payments` | List outgoing payments |
 | `botwallet_cancel_payment` | Cancel a pending payment |
 
 ### Earning
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
-| `botwallet_create_paylink` | Create a payment request / invoice |
-| `botwallet_send_paylink` | Send paylink via email or bot inbox |
+| `botwallet_create_paylink` | Create a payment request or invoice |
+| `botwallet_send_paylink` | Send a paylink via email or bot inbox |
 | `botwallet_get_paylink` | Check paylink status |
-| `botwallet_list_paylinks` | List your payment requests |
+| `botwallet_list_paylinks` | List your paylinks |
 | `botwallet_cancel_paylink` | Cancel a pending paylink |
 
 ### Funding
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
-| `botwallet_get_deposit_address` | Get USDC deposit address |
-| `botwallet_request_funds` | Ask human owner for funds |
-| `botwallet_list_fund_requests` | List fund request history |
+| `botwallet_get_deposit_address` | Get the USDC deposit address |
+| `botwallet_request_funds` | Ask the human owner for funds |
+| `botwallet_list_fund_requests` | List past fund requests |
 
 ### Withdrawals
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
-| `botwallet_withdraw` | Withdraw USDC to external address |
-| `botwallet_confirm_withdrawal` | Complete an approved withdrawal |
+| `botwallet_withdraw` | Withdraw USDC to an external Solana address |
+| `botwallet_confirm_withdrawal` | Complete a withdrawal after approval |
 | `botwallet_get_withdrawal` | Check withdrawal status |
 
-### x402 Paid APIs
-| Tool | Description |
+### x402 paid APIs
+| Tool | What it does |
 |------|-------------|
 | `botwallet_x402_discover` | Search for paid APIs |
 | `botwallet_x402_fetch` | Probe a URL for payment requirements |
-| `botwallet_x402_pay_and_fetch` | Pay and fetch content from x402 API |
+| `botwallet_x402_pay_and_fetch` | Pay and retrieve content from an x402 API |
 
-### History & Guard Rails
-| Tool | Description |
+### History and guard rails
+| Tool | What it does |
 |------|-------------|
 | `botwallet_transactions` | Full transaction ledger |
-| `botwallet_my_limits` | View owner-set spending limits |
-| `botwallet_pending_approvals` | List actions awaiting approval |
+| `botwallet_my_limits` | View spending limits set by the owner |
+| `botwallet_pending_approvals` | List actions waiting for approval |
 | `botwallet_approval_status` | Check a specific approval |
 | `botwallet_events` | Wallet notifications |
 
-### Wallet Transfer
-| Tool | Description |
+### Wallet transfer
+| Tool | What it does |
 |------|-------------|
-| `botwallet_wallet_export` | Export wallet to encrypted .bwlt file |
-| `botwallet_wallet_import` | Import wallet from .bwlt file |
-| `botwallet_wallet_backup` | Reveal mnemonic backup phrase |
+| `botwallet_wallet_export` | Export wallet to an encrypted .bwlt file |
+| `botwallet_wallet_import` | Import wallet from a .bwlt file |
+| `botwallet_wallet_backup` | Reveal the mnemonic backup phrase |
 
 ## Resources
 
-The server also exposes an MCP resource:
-
-| URI | Description |
-|-----|-------------|
-| `botwallet://status` | Current wallet status summary (balance, budget, seed status) |
-
-## Security
-
-- **FROST 2-of-2 threshold signing** — neither agent nor server can sign alone
-- **Local key shares** stored in `~/.botwallet/seeds/` — never transmitted
-- **Guard rails** enforced server-side — agents can't bypass spending limits
-- **Owner approvals** for transactions above auto-approve thresholds
-- **No full private key** exists anywhere — ever
-
-See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+| URI | What it returns |
+|-----|-----------------|
+| `botwallet://status` | Wallet summary — balance, budget, seed file status |
 
 ## Architecture
 
@@ -207,17 +202,23 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting.
                                                         └───────────┘
 ```
 
-The MCP server runs **locally** on the agent's machine. It reads key shares from `~/.botwallet/seeds/`, communicates with the BotWallet API for FROST co-signing, and submits transactions to Solana.
+The server runs locally on the agent's machine. Key shares stay in `~/.botwallet/seeds/` and are never sent over the network. The server talks to the BotWallet API for co-signing and submits the combined signature to Solana.
 
-## CLI Interop
+## Security
 
-The MCP server shares configuration with the [BotWallet CLI](https://github.com/botwallet-co/agent-cli):
+The agent can't bypass spending limits. Those are enforced server-side. Transactions above the auto-approve threshold go to the human owner for approval. Key shares are stored locally and never leave the machine. There is no full private key anywhere in the system.
 
-- **Same config**: `~/.botwallet/config.json`
-- **Same seeds**: `~/.botwallet/seeds/*.seed`
-- **Same .bwlt format**: Export from CLI, import via MCP (and vice versa)
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
-Wallets created by either tool are usable by both.
+## CLI interop
+
+This MCP server and the [BotWallet CLI](https://github.com/botwallet-co/agent-cli) share the same local files:
+
+- Config: `~/.botwallet/config.json`
+- Seeds: `~/.botwallet/seeds/*.seed`
+- Export format: `.bwlt` (encrypted, works both directions)
+
+A wallet created with the CLI works in the MCP server, and vice versa.
 
 ## Development
 
