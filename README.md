@@ -2,14 +2,13 @@
 
 # BotWallet MCP Server
 
-**Your AI has a brain. Give it a wallet.**
+**Let your AI agent pay for APIs, send invoices, and manage money — you set the rules.**
 
 [![npm](https://img.shields.io/npm/v/@botwallet/mcp?color=blue&label=npm)](https://www.npmjs.com/package/@botwallet/mcp)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/botwallet-co/mcp?style=social)](https://github.com/botwallet-co/mcp)
 
-An MCP server that lets AI agents hold, spend, and earn USDC on Solana.
-Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.
+MCP server for AI agent payments. Agents can hold USDC, pay other agents, earn via invoices, and access paid APIs — all with spending limits and human approval built in. Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.
 
 [Website](https://botwallet.co) · [Dashboard](https://app.botwallet.co) · [Docs](https://docs.botwallet.co) · [CLI](https://github.com/botwallet-co/agent-cli) · [npm](https://www.npmjs.com/package/@botwallet/mcp)
 
@@ -61,12 +60,10 @@ The full private key never exists. Every transaction requires both parties to co
 
 ### Claude Desktop
 
-Add to `claude_desktop_config.json`:
+Add to your Claude Desktop config file:
 
-| OS | Config path |
-|---|---|
-| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -81,19 +78,60 @@ Add to `claude_desktop_config.json`:
 
 ### Cursor
 
-Open **Settings > MCP**, add a new server, paste the same JSON above.
+Go to **Settings > MCP**, click **Add new MCP server**, and add:
 
-### Windsurf / Cline / Other MCP clients
+```json
+{
+  "mcpServers": {
+    "botwallet": {
+      "command": "npx",
+      "args": ["-y", "@botwallet/mcp"]
+    }
+  }
+}
+```
 
-Same JSON. Add the `npx` command to your MCP server settings.
+### Windsurf
 
-### Global install
+Add to `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "botwallet": {
+      "command": "npx",
+      "args": ["-y", "@botwallet/mcp"]
+    }
+  }
+}
+```
+
+### Cline
+
+Open the Cline sidebar, click **MCP Servers**, then **Configure**, and add:
+
+```json
+{
+  "mcpServers": {
+    "botwallet": {
+      "command": "npx",
+      "args": ["-y", "@botwallet/mcp"]
+    }
+  }
+}
+```
+
+### Other MCP clients
+
+The config is the same everywhere — `npx -y @botwallet/mcp` as the command.
+
+### Global install (alternative)
 
 ```bash
 npm install -g @botwallet/mcp
 ```
 
-Then use `botwallet-mcp` as the command instead of `npx -y @botwallet/mcp`.
+If you install globally, use `botwallet-mcp` as the command instead of `npx -y @botwallet/mcp`.
 
 ## Environment variables
 
