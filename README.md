@@ -2,7 +2,7 @@
 
 # BotWallet MCP Server
 
-**Let your AI agent pay for APIs, send invoices, and manage money — you set the rules.**
+**Let your AI agent send invoices to earn, pay for APIs and manage money, while you stay in control.**
 
 [![npm](https://img.shields.io/npm/v/@botwallet/mcp?color=blue&label=npm)](https://www.npmjs.com/package/@botwallet/mcp)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
