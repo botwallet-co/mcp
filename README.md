@@ -2,7 +2,7 @@
 
 # BotWallet MCP Server
 
-**Give any AI agent a wallet — via Model Context Protocol.**
+**Your AI has a brain. Give it a wallet.**
 
 [![npm](https://img.shields.io/npm/v/@botwallet/mcp?color=blue&label=npm)](https://www.npmjs.com/package/@botwallet/mcp)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
@@ -11,14 +11,40 @@
 MCP server that gives AI agents the ability to hold, spend, and earn real money (USDC on Solana).
 Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.
 
-[Website](https://botwallet.co) · [Dashboard](https://app.botwallet.co) · [Docs](https://docs.botwallet.co) · [CLI](https://github.com/botwallet-co/agent-cli)
+[Website](https://botwallet.co) · [Dashboard](https://app.botwallet.co) · [Docs](https://docs.botwallet.co) · [CLI](https://github.com/botwallet-co/agent-cli) · [npm](https://www.npmjs.com/package/@botwallet/mcp)
 
 </div>
 
 ---
 
-## What can an agent do with BotWallet?
+Add one JSON block. Your agent has a wallet with spending limits, human oversight, and FROST threshold signing.
 
+```json
+{
+  "mcpServers": {
+    "botwallet": {
+      "command": "npx",
+      "args": ["-y", "@botwallet/mcp"]
+    }
+  }
+}
+```
+
+Then ask your agent:
+
+> "Create a BotWallet for yourself"
+
+The agent runs `botwallet_register` — generates a FROST key share locally, completes distributed key generation with the server, and returns a deposit address. No pre-configuration needed.
+
+> "Send $5 to @acme-bot for the data report"
+
+The agent checks affordability, creates a payment intent, FROST co-signs with the server, and submits to Solana. If the amount exceeds guard rails, it requests owner approval instead.
+
+> "Create an invoice for $25 for the consulting session"
+
+The agent creates a paylink and sends it to the client. When paid, the USDC lands in the agent's wallet.
+
+**What agents can do with BotWallet:**
 - **Pay** other agents and merchants
 - **Earn** money via invoices and payment links
 - **Access paid APIs** through the [x402 protocol](https://www.x402.org/)
@@ -28,31 +54,15 @@ Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible clien
 
 Every transaction uses **FROST 2-of-2 threshold signing** — the agent holds one key share locally and the server holds the other. The full private key never exists anywhere. Human owners set guard rails (per-transaction limits, daily budgets, merchant allowlists) and approve anything outside the rules.
 
-## Quick Start
+## Installation
 
 ### Claude Desktop
 
-Add to your `claude_desktop_config.json`:
+Add to `claude_desktop_config.json`:
 
-```json
-{
-  "mcpServers": {
-    "botwallet": {
-      "command": "npx",
-      "args": ["-y", "@botwallet/mcp"]
-    }
-  }
-}
-```
-
-Config file location:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-### Cursor
-
-Open **Settings → MCP** and add a new server:
-
 ```json
 {
   "mcpServers": {
@@ -63,6 +73,10 @@ Open **Settings → MCP** and add a new server:
   }
 }
 ```
+
+### Cursor
+
+Open **Settings > MCP** and add a new server with the same configuration above.
 
 ### Windsurf / Cline / Other MCP Clients
 
@@ -75,19 +89,6 @@ npm install -g @botwallet/mcp
 ```
 
 Then use `botwallet-mcp` as the command instead of `npx -y @botwallet/mcp`.
-
-## First Run
-
-Once connected, ask your agent:
-
-> "Create a BotWallet for yourself"
-
-The agent will run `botwallet_register`, which:
-1. Generates a FROST key share locally (saved to `~/.botwallet/seeds/`)
-2. Completes distributed key generation with the server
-3. Returns an API key, deposit address, and claim link for the human owner
-
-No pre-configuration needed — the agent bootstraps everything.
 
 ## Environment Variables
 
@@ -185,6 +186,8 @@ The server also exposes an MCP resource:
 - **Owner approvals** for transactions above auto-approve thresholds
 - **No full private key** exists anywhere — ever
 
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
 ## Architecture
 
 ```
@@ -196,7 +199,7 @@ The server also exposes an MCP resource:
                                               ┌───────┴───────┐
                                               │               │
                                      ~/.botwallet/     api.botwallet.co
-                                     (seeds, config)   (Supabase Edge Fn)
+                                     (seeds, config)        (API)
                                                               │
                                                         ┌─────┴─────┐
                                                         │  Solana   │
@@ -219,21 +222,12 @@ Wallets created by either tool are usable by both.
 ## Development
 
 ```bash
-# Clone
 git clone https://github.com/botwallet-co/mcp.git
 cd mcp
-
-# Install
 npm install
-
-# Build
 npm run build
-
-# Test
-npm test
-
-# Inspect with MCP Inspector
-npm run inspect
+npm test                # 76 tests (unit + integration + E2E)
+npm run inspect         # Open in MCP Inspector
 ```
 
 ## License
