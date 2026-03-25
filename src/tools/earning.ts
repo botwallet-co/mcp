@@ -16,7 +16,8 @@ const createPaylink: ToolDefinition = {
   description:
     'Create a payment request (paylink) that someone can pay. ' +
     'Returns a payment URL and short code that you can share or send via botwallet_send_paylink. ' +
-    'Supports itemized invoices via the items array — when provided, the total is calculated from items.',
+    'Supports itemized invoices via the items array — when items are provided, the total is auto-calculated. ' +
+    'You must provide either `amount` or `items` (or both).',
   inputSchema: z.object({
     amount: AmountSchema.optional()
       .describe('Amount to request in USD (optional if items are provided — total calculated from items)'),
@@ -44,8 +45,15 @@ const createPaylink: ToolDefinition = {
         ));
       }
 
+      // Auto-calculate amount from items when not explicitly provided
+      let finalAmount = amount;
+      if (!finalAmount && items && items.length > 0) {
+        const totalCents = items.reduce((sum, item) => sum + item.total_cents, 0);
+        finalAmount = totalCents / 100;
+      }
+
       const result = await ctx.sdk.createPaymentRequest({
-        amount: amount ?? 0,
+        amount: finalAmount,
         description,
         reference,
         expires_in,

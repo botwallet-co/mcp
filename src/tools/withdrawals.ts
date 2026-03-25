@@ -11,9 +11,11 @@ const withdraw: ToolDefinition = {
   name: 'botwallet_withdraw',
   description:
     'Withdraw USDC to an external Solana address. ' +
-    'If the withdrawal is pre-approved, it completes immediately via FROST threshold signing. ' +
-    'If it requires owner approval, returns `needs_approval: true` — check botwallet_events for the result, ' +
-    'then call botwallet_confirm_withdrawal.',
+    'If the withdrawal is pre-approved, it completes immediately via FROST threshold signing and returns `withdrawn: true`. ' +
+    'If it requires owner approval, returns `needs_approval: true` with a `transaction_id` and `approval_url`. ' +
+    'Approval flow: (1) Store the `transaction_id`, (2) Poll `botwallet_approval_status` or `botwallet_events` until status is "approved", ' +
+    '(3) Call `botwallet_confirm_withdrawal` with the `transaction_id`. ' +
+    'Fees: $0.01 minimum or 1% of the transaction amount, whichever is greater.',
   inputSchema: z.object({
     amount: AmountSchema.describe('Amount to withdraw in USD'),
     to_address: z.string().min(32).max(44)
@@ -30,29 +32,35 @@ const withdraw: ToolDefinition = {
       };
       const idemKey = idempotency_key || randomUUID();
       const withdrawResult = await ctx.sdk.withdraw({ amount, to_address, reason }, idemKey);
+      const result = withdrawResult as unknown as Record<string, unknown>;
 
-      // Needs approval
-      if ('status' in withdrawResult && withdrawResult.status === 'pending_approval') {
+      // Awaiting owner approval — return structured response (not an error)
+      if (result.status === 'awaiting_approval') {
         return formatResult({
           needs_approval: true,
-          approval_id: withdrawResult.approval_id,
-          amount: withdrawResult.amount,
-          to_address: withdrawResult.to_address,
-          reason: withdrawResult.reason,
-          message: withdrawResult.message,
-          approval_url: withdrawResult.approval_url,
-          next_steps: 'Check botwallet_events for approval result, then call botwallet_confirm_withdrawal.',
+          transaction_id: result.withdrawal_id,
+          withdrawal_id: result.withdrawal_id,
+          approval_id: result.approval_id,
+          approval_url: result.approval_url,
+          amount_usdc: result.amount_usdc,
+          to_address: result.to_address,
+          reason: result.reason,
+          message: result.message,
+          next_step: 'Wait for owner approval, then call botwallet_confirm_withdrawal with the transaction_id',
+          confirm_tool: 'botwallet_confirm_withdrawal',
+          confirm_args: { transaction_id: result.withdrawal_id },
+          check_tool: 'botwallet_approval_status',
+          check_args: { approval_id: result.approval_id },
         });
       }
 
-      // Pre-approved with transaction_id: confirm → get Solana tx → FROST sign
-      const result = withdrawResult as Record<string, unknown>;
-      if (result.transaction_id) {
+      // Pre-approved with withdrawal_id: confirm -> FROST sign -> submit
+      const txId = (result.withdrawal_id || result.transaction_id) as string;
+      if (txId) {
         if (!ctx.config.hasSeed || !ctx.config.walletName) {
           return noSeedError('complete withdrawal (FROST signing)');
         }
 
-        const txId = result.transaction_id as string;
         const confirmResult = await ctx.sdk.confirmWithdrawal({
           withdrawal_id: txId,
         });
@@ -70,9 +78,10 @@ const withdraw: ToolDefinition = {
           confirmResult.message,
         );
 
+        const { paid, ...cleanResult } = signResult as Record<string, unknown>;
         return formatResult({
           withdrawn: true,
-          ...signResult,
+          ...cleanResult,
         });
       }
 
@@ -116,9 +125,10 @@ const confirmWithdrawal: ToolDefinition = {
         confirmResult.message,
       );
 
+      const { paid, ...cleanResult } = signResult as Record<string, unknown>;
       return formatResult({
         withdrawn: true,
-        ...signResult,
+        ...cleanResult,
       });
     } catch (e) {
       return formatToolError(e);

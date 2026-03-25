@@ -35,9 +35,9 @@ const walletExport: ToolDefinition = {
       const { output_path } = args as { output_path: string };
       const walletName = ctx.config.walletName;
 
-      // Get encryption key from server
+      // Get encryption key from server (returned as base64)
       const exportResult = await ctx.sdk.walletExport();
-      const key = hexToBytes(exportResult.encryption_key);
+      const key = base64ToBytes(exportResult.encryption_key);
 
       // Build payload: seed mnemonic + wallet name
       const mnemonic = loadSeed(walletName);
@@ -79,9 +79,9 @@ const walletImport: ToolDefinition = {
       // Read and parse .bwlt file
       const bwlt = readBwlt(file_path);
 
-      // Get decryption key from server (no auth required — uses export_id)
+      // Get decryption key from server (no auth required — uses export_id, returned as base64)
       const importResult = await ctx.sdk.walletImportKey({ export_id: bwlt.exportId });
-      const key = hexToBytes(importResult.encryption_key);
+      const key = base64ToBytes(importResult.encryption_key);
 
       // Decrypt payload
       const plaintext = decryptPayload(key, bwlt.nonce, bwlt.ciphertext);
@@ -159,10 +159,11 @@ export const transferTools: ToolDefinition[] = [
   walletBackup,
 ];
 
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
 }

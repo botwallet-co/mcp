@@ -61,7 +61,9 @@ const pendingApprovals: ToolDefinition = {
 
 const approvalStatus: ToolDefinition = {
   name: 'botwallet_approval_status',
-  description: 'Check the status of a specific approval by ID. Shows if it is pending, approved, rejected, or expired.',
+  description:
+    'Check the status of a specific approval by ID. Shows if it is pending, approved, rejected, or expired. ' +
+    'When approved, includes the tool name and arguments needed to confirm the transaction.',
   inputSchema: z.object({
     approval_id: z.string().describe('Approval ID to check'),
   }),
@@ -69,7 +71,26 @@ const approvalStatus: ToolDefinition = {
     try {
       const { approval_id } = args as { approval_id: string };
       const result = await ctx.sdk.approvalStatus({ approval_id });
-      return formatResult(result);
+      const data = result as Record<string, unknown>;
+
+      // Enrich with MCP tool references (the API returns CLI commands only)
+      if (data.actionable && data.transaction_id) {
+        const txId = data.transaction_id as string;
+        const type = data.type as string;
+
+        if (type === 'withdrawal') {
+          data.confirm_tool = 'botwallet_confirm_withdrawal';
+          data.confirm_args = { transaction_id: txId };
+        } else if (type === 'x402_payment') {
+          data.confirm_tool = 'botwallet_x402_pay_and_fetch';
+          data.confirm_args = { fetch_id: txId };
+        } else {
+          data.confirm_tool = 'botwallet_confirm_payment';
+          data.confirm_args = { transaction_id: txId };
+        }
+      }
+
+      return formatResult(data);
     } catch (e) {
       return formatToolError(e);
     }
@@ -104,15 +125,19 @@ const events: ToolDefinition = {
       const result = await ctx.sdk.events(eventParams);
 
       // Mark as read if requested
+      let markedCount = 0;
       if (mark_read && result.events.length > 0) {
-        const eventIds = result.events.map(e => e.event_id);
-        await ctx.sdk.markRead({ event_ids: eventIds });
+        const eventIds = result.events.map(e => e.id).filter(Boolean);
+        if (eventIds.length > 0) {
+          const markResult = await ctx.sdk.markRead({ event_ids: eventIds });
+          markedCount = markResult.marked_read ?? eventIds.length;
+        }
       }
 
       return formatResult({
         ...result,
-        marked_as_read: mark_read ? result.events.length : 0,
-      });
+        marked_as_read: markedCount,
+      } as unknown as Record<string, unknown>);
     } catch (e) {
       return formatToolError(e);
     }

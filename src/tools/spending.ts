@@ -29,8 +29,11 @@ const lookup: ToolDefinition = {
 const canIAfford: ToolDefinition = {
   name: 'botwallet_can_i_afford',
   description:
-    'Pre-flight check before paying. Shows the fee, total cost, and your balance after payment. ' +
-    'Also warns if the payment requires owner approval or exceeds limits. ' +
+    'Pre-flight check before paying. Returns two separate answers: ' +
+    '(1) `can_afford` — do you have enough balance? ' +
+    '(2) `will_auto_approve` — will the payment go through without owner approval? ' +
+    'Also shows the fee, total cost, and your balance after payment. ' +
+    'Fees: $0.01 minimum or 1% of the transaction amount, whichever is greater. ' +
     'Always call this before botwallet_pay if unsure about your balance.',
   inputSchema: z.object({
     to: UsernameSchema.describe('Recipient username'),
@@ -39,8 +42,41 @@ const canIAfford: ToolDefinition = {
   async handler(args, ctx) {
     try {
       const { to, amount } = args as { to: string; amount: number };
-      const result = await ctx.sdk.canIAfford({ to, amount });
-      return formatResult(result);
+      const apiResult = await ctx.sdk.canIAfford({ to, amount });
+      const result = apiResult as unknown as Record<string, unknown>;
+
+      if (result.can_pay) {
+        return formatResult({
+          ...result,
+          can_afford: true,
+          will_auto_approve: true,
+        });
+      }
+
+      if (result.reason === 'needs_approval') {
+        return formatResult({
+          ...result,
+          can_afford: true,
+          will_auto_approve: false,
+          needs_approval: true,
+        });
+      }
+
+      if (result.reason === 'insufficient_funds') {
+        return formatResult({
+          ...result,
+          can_afford: false,
+          will_auto_approve: false,
+        });
+      }
+
+      // Other guard rail blocks (blacklist, disabled, etc.)
+      return formatResult({
+        ...result,
+        can_afford: false,
+        will_auto_approve: false,
+        blocked: true,
+      });
     } catch (e) {
       return formatToolError(e);
     }
@@ -53,9 +89,12 @@ const pay: ToolDefinition = {
     'Make a payment to a merchant or bot. Specify `to` + `amount` for direct payments, ' +
     'or `payment_request_id` to pay a specific paylink. ' +
     'If the payment is within your guard rails, it completes immediately via FROST threshold signing ' +
-    'and returns your new balance. If it requires owner approval, returns `needs_approval: true` ' +
-    'with a `transaction_id` — check botwallet_events for the approval result, then call ' +
-    'botwallet_confirm_payment. Always call botwallet_can_i_afford first if unsure about your balance.',
+    'and returns `paid: true` with your new balance. ' +
+    'If it requires owner approval, returns `needs_approval: true` with a `transaction_id` and `approval_url`. ' +
+    'Approval flow: (1) Store the `transaction_id`, (2) Poll `botwallet_approval_status` or `botwallet_events` until status is "approved", ' +
+    '(3) Call `botwallet_confirm_payment` with the `transaction_id`. ' +
+    'Fees: $0.01 minimum or 1% of the transaction amount, whichever is greater. ' +
+    'Always call botwallet_can_i_afford first if unsure about your balance.',
   inputSchema: z.object({
     to: UsernameSchema.optional().describe('Recipient username (required unless using payment_request_id)'),
     amount: AmountSchema.optional().describe('Amount in USD (required unless using payment_request_id)'),
@@ -77,27 +116,36 @@ const pay: ToolDefinition = {
 
       const idemKey = idempotency_key || randomUUID();
       const payResult = await ctx.sdk.pay({ to, amount, payment_request_id, note, reference }, idemKey);
+      const result = payResult as unknown as Record<string, unknown>;
 
-      // If needs approval, return immediately — no signing needed
-      if ('needs_approval' in payResult && payResult.needs_approval) {
+      // Awaiting owner approval — return structured response (not an error)
+      if (result.status === 'awaiting_approval') {
         return formatResult({
           needs_approval: true,
-          approval_id: payResult.approval_id,
-          reason: payResult.reason,
-          message: payResult.message,
-          approval_url: payResult.approval_url,
-          next_steps: 'Check botwallet_events for approval result, then call botwallet_confirm_payment.',
+          transaction_id: result.transaction_id,
+          approval_id: result.approval_id,
+          approval_url: result.approval_url,
+          amount_usdc: result.amount_usdc,
+          fee_usdc: result.fee_usdc,
+          total_usdc: result.total_usdc,
+          to: result.to,
+          note,
+          next_step: 'Wait for owner approval, then call botwallet_confirm_payment with the transaction_id',
+          confirm_tool: 'botwallet_confirm_payment',
+          confirm_args: { transaction_id: result.transaction_id },
+          check_tool: 'botwallet_approval_status',
+          check_args: { approval_id: result.approval_id },
+          expires_at: result.expires_at,
         });
       }
 
       // Already completed (custodial or server-signed)
-      if ('paid' in payResult && payResult.paid) {
-        return formatResult(payResult);
+      if (result.paid) {
+        return formatResult(result);
       }
 
-      // Pre-approved with transaction_id: confirm → get Solana tx → FROST sign
-      const result = payResult as Record<string, unknown>;
-      if (result.transaction_id) {
+      // Pre-approved with transaction_id: confirm -> FROST sign -> submit
+      if (result.status === 'pre_approved' && result.transaction_id) {
         if (!ctx.config.hasSeed || !ctx.config.walletName) {
           return noSeedError('complete payment (FROST signing)');
         }
@@ -122,6 +170,7 @@ const pay: ToolDefinition = {
 
         return formatResult({
           paid: true,
+          auto_approved: true,
           ...signResult,
         });
       }

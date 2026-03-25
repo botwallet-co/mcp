@@ -168,6 +168,44 @@ export interface PayParams {
   reference?: string;
 }
 
+export interface PayPreApprovedResponse {
+  status: 'pre_approved';
+  transaction_id: string;
+  reference_id: string;
+  to: string;
+  to_name: string;
+  amount_usdc: number;
+  fee_usdc: number;
+  total_usdc: number;
+  balance_usdc: number;
+  expires_at: string;
+  created_at: string;
+  message: string;
+  next_step: 'confirm';
+  confirm_command: string;
+}
+
+export interface PayApprovalResponse {
+  status: 'awaiting_approval';
+  transaction_id: string;
+  reference_id: string;
+  approval_id: string;
+  to: string;
+  to_name: string;
+  amount_usdc: number;
+  fee_usdc: number;
+  total_usdc: number;
+  balance_usdc: number;
+  expires_at: string;
+  created_at: string;
+  message: string;
+  approval_reason: string;
+  approval_url: string;
+  next_step: 'wait_for_approval';
+  confirm_command: string;
+  check_command: string;
+}
+
 export interface PaySuccessResponse {
   paid: true;
   transaction_id: string;
@@ -180,16 +218,7 @@ export interface PaySuccessResponse {
   funding_url?: string;
 }
 
-export interface PayApprovalResponse {
-  paid: false;
-  needs_approval: true;
-  approval_id: string;
-  reason: string;
-  message: string;
-  approval_url: string;
-}
-
-export type PayResponse = PaySuccessResponse | PayApprovalResponse;
+export type PayResponse = PayPreApprovedResponse | PayApprovalResponse | PaySuccessResponse;
 
 // -----------------------------------------------------------------------------
 // Response Types - Earning
@@ -342,30 +371,22 @@ export interface WithdrawParams {
   reason: string;
 }
 
-export interface WithdrawProcessingResponse {
-  status: 'processing';
-  withdrawal_id: string;
-  amount: number;
-  network_fee: number;
-  you_receive: number;
-  to_address: string;
-  new_balance: number;
-  message: string;
-}
-
 export interface WithdrawApprovalResponse {
-  status: 'pending_approval';
+  status: 'awaiting_approval';
+  withdrawal_id: string;
   approval_id: string;
-  amount: number;
-  network_fee: number;
-  you_receive: number;
+  amount_usdc: number;
+  network_fee_usdc: number;
+  you_receive_usdc: number;
   to_address: string;
   reason: string;
   message: string;
   approval_url: string;
+  next_step: 'wait_for_approval';
+  confirm_command: string;
 }
 
-export type WithdrawResponse = WithdrawProcessingResponse | WithdrawApprovalResponse;
+export type WithdrawResponse = WithdrawApprovalResponse | Record<string, unknown>;
 
 export interface GetWithdrawalParams {
   withdrawal_id: string;
@@ -579,19 +600,24 @@ export interface EventsParams {
 }
 
 export interface EventRecord {
-  event_id: string;
+  id: string;
   type: string;
   title: string;
   message: string;
-  read: boolean;
+  severity: string;
+  related_id?: string;
+  related_type?: string;
+  metadata?: Record<string, unknown>;
+  is_read: boolean;
   created_at: string;
-  data?: Record<string, unknown>;
 }
 
 export interface EventsResponse {
   events: EventRecord[];
+  count: number;
+  total_matching: number;
   unread_count: number;
-  total: number;
+  tip: string;
 }
 
 export interface MarkReadParams {
@@ -600,8 +626,8 @@ export interface MarkReadParams {
 }
 
 export interface MarkReadResponse {
-  marked: number;
-  remaining_unread: number;
+  marked_read: number;
+  message?: string;
 }
 
 // -----------------------------------------------------------------------------

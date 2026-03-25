@@ -16,24 +16,43 @@ const x402Discover: ToolDefinition = {
   name: 'botwallet_x402_discover',
   description:
     'Search for paid APIs that accept x402 payments. ' +
-    'Searches a curated catalog of APIs or the Coinbase Bazaar directory. ' +
-    'Returns API descriptions, pricing, and endpoints.',
+    'Searches a curated catalog of APIs. ' +
+    'Returns API descriptions, pricing, and endpoints. ' +
+    'Use this to find APIs before calling botwallet_x402_fetch to probe them.',
   inputSchema: z.object({
     query: z.string().optional()
       .describe('Search query (e.g. "weather", "translation", "image generation")'),
-    source: z.enum(['catalog', 'bazaar']).optional()
-      .describe('Search source: "catalog" (curated) or "bazaar" (Coinbase). Default: catalog'),
-    limit: z.number().int().min(1).max(50).optional()
-      .describe('Max results to return'),
-    offset: z.number().int().min(0).optional()
-      .describe('Pagination offset'),
   }),
   async handler(args, ctx) {
     try {
-      const result = await ctx.sdk.x402Discover(args as {
-        query?: string; source?: 'catalog' | 'bazaar'; limit?: number; offset?: number;
+      const { query } = args as { query?: string };
+
+      // x402_catalog is a public endpoint — no auth required
+      // SDK base URL is e.g. https://api.botwallet.co/v1, public is at /v1/public
+      const url = new URL(`${ctx.sdk.getBaseUrl()}/public`);
+      url.searchParams.set('action', 'x402_catalog');
+      if (query) url.searchParams.set('query', query);
+
+      const res = await fetch(url.toString());
+      const json = await res.json() as Record<string, unknown>;
+
+      if (json.success === false) {
+        const err = json.error as Record<string, unknown> | undefined;
+        return formatToolError(new Error(
+          (err?.message as string) || 'Failed to query x402 catalog'
+        ));
+      }
+
+      const data = (json.data || {}) as Record<string, unknown>;
+      const entries = (data.entries || []) as Array<Record<string, unknown>>;
+
+      return formatResult({
+        apis: entries,
+        count: entries.length,
+        message: entries.length === 0
+          ? 'No APIs found matching your query. Try a broader search term.'
+          : `Found ${entries.length} API(s). Use botwallet_x402_fetch to probe any URL.`,
       });
-      return formatResult(result);
     } catch (e) {
       return formatToolError(e);
     }

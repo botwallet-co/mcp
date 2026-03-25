@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { base58 } from '@scure/base';
 import type { ToolDefinition, ToolContext, ToolResult } from '../types.js';
 import { formatResult } from '../utils/format.js';
 import { formatToolError, noSeedError, noConfigError } from '../utils/errors.js';
@@ -81,13 +82,13 @@ const register: ToolDefinition = {
 
       // Step 3: Compute group key (the Solana wallet address)
       const groupKey = computeGroupKey(keyShare.public, Uint8Array.from(serverPublicBytes));
-      const groupKeyB64 = Buffer.from(groupKey).toString('base64');
+      const groupKeyB58 = base58.encode(groupKey);
 
       // Step 4: Complete DKG — server verifies and creates wallet
       const result = await ctx.sdk.dkgComplete({
         session_id: dkgInit.session_id,
         agent_public_share: botPublicB64,
-        group_public_key: groupKeyB64,
+        group_public_key: groupKeyB58,
       });
 
       // Step 5: Save locally
@@ -96,7 +97,7 @@ const register: ToolDefinition = {
         username: result.username,
         display_name: name,
         api_key: result.api_key,
-        public_key: Buffer.from(groupKey).toString('hex'),
+        public_key: groupKeyB58,
         seed_file: `${result.username}.seed`,
         created_at: new Date().toISOString(),
       });
@@ -149,7 +150,17 @@ const balance: ToolDefinition = {
   async handler(_args, ctx) {
     try {
       const result = await ctx.sdk.balance();
-      return formatResult(result);
+      const data = result as unknown as Record<string, unknown>;
+
+      // Enrich budget information so agents understand null values
+      if (data.budget == null && data.remaining_budget == null) {
+        data.budget_status = 'no_budget_set';
+        data.budget_message = 'No spending budget is configured. All transactions require owner approval unless auto-approve rules are set in guard rails.';
+      } else {
+        data.budget_status = 'active';
+      }
+
+      return formatResult(data);
     } catch (e) {
       return formatToolError(e);
     }

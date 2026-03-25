@@ -2,40 +2,48 @@ import type { ToolResult } from '../types.js';
 import { BotWalletError } from '../sdk/index.js';
 
 /**
- * Format any error into a structured MCP tool error response.
- * Extracts actionable fields from BotWalletError when available.
+ * Format any error into a structured JSON MCP tool error response.
+ * Returns machine-parseable JSON with error code, message, and actionable details.
  */
 export function formatToolError(error: unknown): ToolResult {
   if (error instanceof BotWalletError) {
-    const parts: string[] = [`Error: ${error.message}`];
+    const payload: Record<string, unknown> = {
+      error: true,
+      code: error.code,
+      message: error.message,
+    };
 
     if (error.howToFix) {
-      parts.push(`How to fix: ${error.howToFix}`);
+      payload.how_to_fix = error.howToFix;
     }
 
-    const extra = error.details;
-    if (extra) {
-      if (extra.funding_url) parts.push(`Fund wallet: ${extra.funding_url}`);
-      if (extra.approval_url) parts.push(`Approval URL: ${extra.approval_url}`);
-      if (extra.balance !== undefined) parts.push(`Current balance: $${extra.balance}`);
-      if (extra.shortfall !== undefined) parts.push(`Shortfall: $${extra.shortfall}`);
+    if (error.details && Object.keys(error.details).length > 0) {
+      payload.details = error.details;
     }
 
     return {
-      content: [{ type: 'text', text: parts.join('\n') }],
+      content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
       isError: true,
     };
   }
 
   if (error instanceof Error) {
     return {
-      content: [{ type: 'text', text: `Error: ${error.message}` }],
+      content: [{ type: 'text', text: JSON.stringify({
+        error: true,
+        code: 'UNKNOWN_ERROR',
+        message: error.message,
+      }, null, 2) }],
       isError: true,
     };
   }
 
   return {
-    content: [{ type: 'text', text: `Error: ${String(error)}` }],
+    content: [{ type: 'text', text: JSON.stringify({
+      error: true,
+      code: 'UNKNOWN_ERROR',
+      message: String(error),
+    }, null, 2) }],
     isError: true,
   };
 }
@@ -47,15 +55,16 @@ export function noSeedError(operation: string): ToolResult {
   return {
     content: [{
       type: 'text',
-      text: [
-        `Error: Cannot ${operation} — no local key share (seed) found.`,
-        '',
-        'FROST threshold signing requires a local key share stored in ~/.botwallet/seeds/.',
-        'To fix this, either:',
-        '  1. Register a new wallet using botwallet_register',
-        '  2. Import a wallet using botwallet_wallet_import',
-        '  3. Set BOTWALLET_WALLET to the wallet name if using a named wallet',
-      ].join('\n'),
+      text: JSON.stringify({
+        error: true,
+        code: 'NO_LOCAL_SEED',
+        message: `Cannot ${operation} — no local key share (seed) found.`,
+        how_to_fix: 'FROST threshold signing requires a local key share stored in ~/.botwallet/seeds/.',
+        options: [
+          { tool: 'botwallet_register', description: 'Register a new wallet' },
+          { tool: 'botwallet_wallet_import', description: 'Import a wallet from a .bwlt file' },
+        ],
+      }, null, 2),
     }],
     isError: true,
   };
@@ -68,13 +77,16 @@ export function noConfigError(operation: string): ToolResult {
   return {
     content: [{
       type: 'text',
-      text: [
-        `Error: Cannot ${operation} — no local config found.`,
-        '',
-        'This operation requires ~/.botwallet/config.json.',
-        'To set up: register a new wallet using botwallet_register,',
-        'or import a wallet using botwallet_wallet_import.',
-      ].join('\n'),
+      text: JSON.stringify({
+        error: true,
+        code: 'NO_LOCAL_CONFIG',
+        message: `Cannot ${operation} — no local config found (~/.botwallet/config.json).`,
+        how_to_fix: 'Register a new wallet or import an existing one.',
+        options: [
+          { tool: 'botwallet_register', description: 'Register a new wallet' },
+          { tool: 'botwallet_wallet_import', description: 'Import a wallet from a .bwlt file' },
+        ],
+      }, null, 2),
     }],
     isError: true,
   };
