@@ -26,6 +26,11 @@ export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'reversed';
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired';
 export type RecipientType = 'merchant' | 'bot';
 
+export interface FeeBreakdown {
+  platform_fee_usdc: number;
+  account_setup_fee_usdc: number;
+}
+
 // -----------------------------------------------------------------------------
 // Response Types - Basics
 // -----------------------------------------------------------------------------
@@ -141,6 +146,7 @@ export interface CanIAffordResponse {
   amount?: number;
   fee?: number;
   total?: number;
+  fee_breakdown?: FeeBreakdown;
   balance_after?: number;
   // Failure fields
   reason?: string;
@@ -177,6 +183,7 @@ export interface PayPreApprovedResponse {
   amount_usdc: number;
   fee_usdc: number;
   total_usdc: number;
+  fee_breakdown?: FeeBreakdown;
   balance_usdc: number;
   expires_at: string;
   created_at: string;
@@ -195,6 +202,7 @@ export interface PayApprovalResponse {
   amount_usdc: number;
   fee_usdc: number;
   total_usdc: number;
+  fee_breakdown?: FeeBreakdown;
   balance_usdc: number;
   expires_at: string;
   created_at: string;
@@ -378,6 +386,7 @@ export interface WithdrawApprovalResponse {
   amount_usdc: number;
   network_fee_usdc: number;
   you_receive_usdc: number;
+  fee_breakdown?: FeeBreakdown;
   to_address: string;
   reason: string;
   message: string;
@@ -398,6 +407,7 @@ export interface GetWithdrawalResponse {
   amount: number;
   network_fee: number;
   you_received: number;
+  fee_breakdown?: FeeBreakdown;
   to_address: string;
   created_at: string;
   completed_at?: string;
@@ -717,6 +727,7 @@ export interface X402PrepareResponse {
   amount_usdc: number;
   fee_usdc: number;
   total_usdc: number;
+  fee_breakdown?: FeeBreakdown;
   pay_to: string;
   network: string;
   [key: string]: unknown;
