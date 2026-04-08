@@ -1,4 +1,4 @@
-# Contributing to BotWallet MCP Server
+# Contributing to Botwallet MCP Server
 
 Thank you for your interest in contributing! This guide will help you get started.
 
