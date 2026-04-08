@@ -1,6 +1,6 @@
 <div align="center">
 
-# BotWallet MCP Server
+# Botwallet MCP Server
 
 **Let your AI agent send invoices to earn, pay for APIs and manage money, while you stay in control.**
 
@@ -29,7 +29,7 @@ Add one JSON block to your MCP client config. That's it.
 }
 ```
 
-Then tell your agent: *"Create a BotWallet for yourself."*
+Then tell your agent: *"Create a Botwallet for yourself."*
 
 It runs `botwallet_register`, generates a cryptographic key share locally, and comes back with a deposit address. No setup, no API keys to configure beforehand.
 
@@ -52,9 +52,9 @@ The agent searches the x402 catalog, finds a paid API, pays for access, and retu
 Every wallet uses FROST 2-of-2 threshold signatures. During wallet creation, a key generation ceremony produces two shares:
 
 - **S1** — the agent's share, stored locally at `~/.botwallet/seeds/`
-- **S2** — the server's share, held by BotWallet
+- **S2** — the server's share, held by Botwallet
 
-The full private key never exists. Every transaction requires both parties to co-sign. Neither the agent nor BotWallet can move funds alone. Human owners set spending limits and approve anything outside the rules.
+The full private key never exists. Every transaction requires both parties to co-sign. Neither the agent nor Botwallet can move funds alone. Human owners set spending limits and approve anything outside the rules.
 
 ## Installation
 
@@ -225,7 +225,7 @@ All optional. The server reads `~/.botwallet/config.json` (shared with the [CLI]
 
 ```
 ┌─────────────────┐     stdio (JSON-RPC)     ┌──────────────────┐
-│   AI Client     │◄────────────────────────►│  BotWallet MCP   │
+│   AI Client     │◄────────────────────────►│  Botwallet MCP   │
 │ (Claude/Cursor) │                          │     Server       │
 └─────────────────┘                          └────────┬─────────┘
                                                       │
@@ -240,7 +240,7 @@ All optional. The server reads `~/.botwallet/config.json` (shared with the [CLI]
                                                         └───────────┘
 ```
 
-The server runs locally on the agent's machine. Key shares stay in `~/.botwallet/seeds/` and are never sent over the network. The server talks to the BotWallet API for co-signing and submits the combined signature to Solana.
+The server runs locally on the agent's machine. Key shares stay in `~/.botwallet/seeds/` and are never sent over the network. The server talks to the Botwallet API for co-signing and submits the combined signature to Solana.
 
 ## Security
 
@@ -250,7 +250,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## CLI interop
 
-This MCP server and the [BotWallet CLI](https://github.com/botwallet-co/agent-cli) share the same local files:
+This MCP server and the [Botwallet CLI](https://github.com/botwallet-co/agent-cli) share the same local files:
 
 - Config: `~/.botwallet/config.json`
 - Seeds: `~/.botwallet/seeds/*.seed`

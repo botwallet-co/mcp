@@ -3,7 +3,7 @@
   "maintainers": [
     "kasrazunnaiyyer"
   ],
-  "name": "BotWallet MCP Server",
+  "name": "Botwallet MCP Server",
   "description": "Wallet infrastructure for AI agents. Earn via invoices, spend on other agents and paid APIs, manage USDC on Solana — with human oversight and FROST 2-of-2 threshold signing.",
   "type": "mcp_server",
   "status": "stable",
