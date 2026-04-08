@@ -2,5 +2,36 @@
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": [
     "kasrazunnaiyyer"
+  ],
+  "name": "BotWallet MCP Server",
+  "description": "Wallet infrastructure for AI agents. Earn via invoices, spend on other agents and paid APIs, manage USDC on Solana — with human oversight and FROST 2-of-2 threshold signing.",
+  "type": "mcp_server",
+  "status": "stable",
+  "tools": 36,
+  "transport": ["stdio"],
+  "keywords": [
+    "wallet",
+    "payments",
+    "ai-agent",
+    "agent-payments",
+    "frost",
+    "threshold-signing",
+    "solana",
+    "usdc",
+    "x402",
+    "non-custodial",
+    "guard-rails",
+    "spending-limits",
+    "invoices",
+    "paylinks",
+    "micropayments",
+    "machine-to-machine",
+    "agent-economy",
+    "pay-per-call",
+    "api-payments",
+    "human-oversight",
+    "approval-workflow",
+    "crypto-wallet",
+    "stablecoin"
   ]
 }
