@@ -3,7 +3,7 @@ import type { ToolResult } from '../types.js';
 /**
  * Format a successful tool result as JSON text.
  */
-export function formatResult(data: Record<string, unknown>): ToolResult {
+export function formatResult(data: object): ToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
   };

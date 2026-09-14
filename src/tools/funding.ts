@@ -41,18 +41,19 @@ const requestFunds: ToolDefinition = {
   },
 };
 
+// Status values must match ListFundRequestsParams['status'] — tsc enforces this via z.infer below
+const ListFundRequestsSchema = PaginationSchema.extend({
+  status: z.enum(['pending', 'funded', 'dismissed', 'all']).optional()
+    .describe('Filter by status (default: all)'),
+});
+
 const listFundRequests: ToolDefinition = {
   name: 'botwallet_list_fund_requests',
   description: 'List your fund requests with status (pending, funded, dismissed). Supports pagination.',
-  inputSchema: PaginationSchema.extend({
-    status: z.enum(['pending', 'funded', 'dismissed', 'all']).optional()
-      .describe('Filter by status (default: all)'),
-  }),
+  inputSchema: ListFundRequestsSchema,
   async handler(args, ctx) {
     try {
-      const result = await ctx.sdk.listFundRequests(args as {
-        status?: string; limit?: number; offset?: number;
-      });
+      const result = await ctx.sdk.listFundRequests(args as z.infer<typeof ListFundRequestsSchema>);
       return formatResult(result);
     } catch (e) {
       return formatToolError(e);

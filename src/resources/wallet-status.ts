@@ -12,20 +12,22 @@ export async function getWalletStatus(
   config: ConfigContext,
 ): Promise<string> {
   try {
-    const [info, bal] = await Promise.all([
+    const [infoRes, balRes] = await Promise.all([
       sdk.info(),
       sdk.balance(),
     ]);
+    const info = infoRes as unknown as Record<string, unknown>;
+    const bal = balRes as unknown as Record<string, unknown>;
 
-    const balance = (bal as Record<string, unknown>).balance as number ?? 0;
-    const budget = (bal as Record<string, unknown>).budget as number | undefined;
-    const spentThisPeriod = (bal as Record<string, unknown>).spent_this_period as number | undefined;
-    const remainingBudget = (bal as Record<string, unknown>).remaining_budget as number | undefined;
-    const budgetPeriod = (bal as Record<string, unknown>).budget_period as string | undefined;
+    const balance = bal.balance as number ?? 0;
+    const budget = bal.budget as number | undefined;
+    const spentThisPeriod = bal.spent_this_period as number | undefined;
+    const remainingBudget = bal.remaining_budget as number | undefined;
+    const budgetPeriod = bal.budget_period as string | undefined;
 
     const lines: string[] = [
-      `Wallet: ${(info as Record<string, unknown>).name || (info as Record<string, unknown>).username} (@${(info as Record<string, unknown>).username})`,
-      `Status: ${(info as Record<string, unknown>).status} | Owner: ${(info as Record<string, unknown>).is_claimed ? 'claimed' : 'unclaimed'}`,
+      `Wallet: ${info.name || info.username} (@${info.username})`,
+      `Status: ${info.status} | Owner: ${info.is_claimed ? 'claimed' : 'unclaimed'}`,
       `Balance: ${formatUsd(balance)} USDC`,
     ];
 
@@ -37,7 +39,7 @@ export async function getWalletStatus(
       );
     }
 
-    lines.push(`Deposit Address: ${(info as Record<string, unknown>).deposit_address}`);
+    lines.push(`Deposit Address: ${info.deposit_address}`);
 
     if (config.walletName) {
       const hasSeed = seedExists(config.walletName);
@@ -48,8 +50,8 @@ export async function getWalletStatus(
       lines.push('Local Key Share: not configured (env-only mode)');
     }
 
-    if ((bal as Record<string, unknown>).low_balance) {
-      lines.push(`⚠ Low balance — fund via: ${(info as Record<string, unknown>).funding_url}`);
+    if (bal.low_balance) {
+      lines.push(`⚠ Low balance — fund via: ${info.funding_url}`);
     }
 
     return lines.join('\n');

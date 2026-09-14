@@ -53,13 +53,14 @@ const createPaylink: ToolDefinition = {
       }
 
       const result = await ctx.sdk.createPaymentRequest({
-        amount: finalAmount,
+        // Always set by here: the guard above requires amount or a non-empty items list
+        amount: finalAmount as number,
         description,
         reference,
         expires_in,
         reveal_owner,
         line_items: items,
-      } as Record<string, unknown>);
+      });
       return formatResult(result);
     } catch (e) {
       return formatToolError(e);
@@ -115,6 +116,12 @@ const getPaylink: ToolDefinition = {
   },
 };
 
+// Status values must match ListPaymentRequestsParams['status'] — tsc enforces this via z.infer below
+const ListPaylinksSchema = PaginationSchema.extend({
+  status: z.enum(['pending', 'completed', 'expired', 'cancelled', 'all']).optional()
+    .describe('Filter by status (default: all)'),
+});
+
 const listPaylinks: ToolDefinition = {
   name: 'botwallet_list_paylinks',
   description:
@@ -122,15 +129,10 @@ const listPaylinks: ToolDefinition = {
     'Filter by status to find pending, completed, or expired paylinks. ' +
     'For payments you SENT (outgoing), use botwallet_list_payments. ' +
     'For all money movements, use botwallet_transactions.',
-  inputSchema: PaginationSchema.extend({
-    status: z.enum(['pending', 'completed', 'expired', 'cancelled', 'all']).optional()
-      .describe('Filter by status (default: all)'),
-  }),
+  inputSchema: ListPaylinksSchema,
   async handler(args, ctx) {
     try {
-      const result = await ctx.sdk.listPaymentRequests(args as {
-        status?: string; limit?: number; offset?: number;
-      });
+      const result = await ctx.sdk.listPaymentRequests(args as z.infer<typeof ListPaylinksSchema>);
       return formatResult(result);
     } catch (e) {
       return formatToolError(e);

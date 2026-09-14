@@ -96,7 +96,6 @@ export type {
   // Withdrawals
   WithdrawParams,
   WithdrawResponse,
-  WithdrawProcessingResponse,
   WithdrawApprovalResponse,
   ConfirmWithdrawalParams,
   ConfirmWithdrawalResponse,

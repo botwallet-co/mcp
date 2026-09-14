@@ -15,11 +15,14 @@ export interface ToolContext {
 export interface ToolDefinition {
   name: string;
   description: string;
-  inputSchema: z.ZodType;
+  // Must be a z.object(...) — server.ts registers tools with inputSchema.shape
+  inputSchema: z.ZodObject<z.ZodRawShape>;
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 }
 
 export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
+  // Matches the MCP SDK's CallToolResult, which allows extra fields
+  [key: string]: unknown;
 }
