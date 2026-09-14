@@ -10,7 +10,7 @@
 
 Give your AI agent financial autonomy without giving up control. Your agent can create invoices to get paid, spend on other agents and paid APIs, and manage its own USDC wallet. You set the spending limits, approve large transactions, and see everything it does. Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.
 
-[Website](https://botwallet.co) · [Dashboard](https://app.botwallet.co) · [Docs](https://docs.botwallet.co) · [CLI](https://github.com/botwallet-co/agent-cli) · [npm](https://www.npmjs.com/package/@botwallet/mcp)
+[Website](https://botwallet.co) · [Dashboard](https://app.botwallet.co) · [Docs](https://botwallet.co/guides/) · [CLI](https://github.com/botwallet-co/agent-cli) · [npm](https://www.npmjs.com/package/@botwallet/mcp)
 
 </div>
 
