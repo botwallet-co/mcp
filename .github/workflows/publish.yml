@@ -6,7 +6,11 @@
 # v<version>; that tag triggers this workflow, which publishes via npm trusted
 # publishing (OIDC) — no npm token anywhere. The trusted publisher is configured on
 # npmjs.com → @botwallet/mcp → Settings → Trusted Publisher (repo botwallet-co/mcp,
-# workflow publish.yml).
+# workflow publish.yml, "Allow npm publish" ticked).
+#
+# The build runs without publish rights: its dependencies are installed fresh, so
+# only the publish job gets the OIDC token, and it publishes the tarball the build
+# job made without installing anything.
 # =============================================================================
 name: Publish to npm
 
@@ -17,53 +21,96 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # creates the GitHub Release for the tag
-  id-token: write # required for npm trusted publishing (OIDC)
+  contents: read
 
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Upgrade npm (trusted publishing needs npm >= 11.5.1)
-        run: npm install -g npm@latest && npm --version
 
       - run: npm install
 
       - name: Verify tag matches package.json version
-        if: github.event_name == 'push'
+        id: version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG=$(node -p "require('./package.json').version")
-          [ "$TAG" = "$PKG" ] || { echo "::error::tag v$TAG but package.json is $PKG"; exit 1; }
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but package.json is $VERSION"; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - run: npm run build
       - run: npm test
+      - run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: botwallet-mcp-*.tgz
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC)
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Node 24 ships an npm that can use trusted publishing (11.5.1 or later), so
+      # the job that holds the publish token installs nothing
+      - name: Check npm supports trusted publishing
+        run: |
+          v=$(npm --version) && echo "npm $v"
+          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number);process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)' "$v" \
+            || { echo "::error::npm $v cannot use trusted publishing; it needs 11.5.1 or later"; exit 1; }
 
       - name: Publish
         run: |
-          VERSION=$(node -p "require('./package.json').version")
           if npm view "@botwallet/mcp@$VERSION" version >/dev/null 2>&1; then
             echo "@botwallet/mcp@$VERSION is already on npm — nothing to do"
           else
-            npm publish --access public --ignore-scripts
+            # npm needs a dist-tag for a prerelease; keep those off latest
+            case "$VERSION" in *-*) DIST_TAG=next ;; *) DIST_TAG=latest ;; esac
+            npm publish "./botwallet-mcp-$VERSION.tgz" --access public --tag "$DIST_TAG"
           fi
           echo "npm: $(npm view @botwallet/mcp version)" >> "$GITHUB_STEP_SUMMARY"
 
+  release:
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creates the GitHub Release for the tag
+    steps:
       - name: GitHub Release
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes

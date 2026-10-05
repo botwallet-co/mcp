@@ -1,6 +1,6 @@
 {
   "name": "@botwallet/mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "MCP server for Botwallet — AI agent payments with FROST threshold signing on Solana",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -15,8 +15,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format cjs --dts --clean",
-    "dev": "tsup src/index.ts --format cjs --dts --watch",
+    "build": "tsup",
+    "dev": "tsup --watch",
     "test": "vitest run",
     "test:e2e": "vitest run --mode e2e tests/e2e",
     "test:watch": "vitest",
@@ -29,11 +29,11 @@
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@noble/curves": "^1.8.0",
     "@noble/hashes": "^1.7.0",
-    "@scure/base": "^2.0.0",
     "@scure/bip39": "^1.5.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@scure/base": "^2.0.0",
     "@types/node": "^22.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0",

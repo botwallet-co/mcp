@@ -78,6 +78,29 @@ describe('config', () => {
     expect(loaded.wallets).toEqual({});
   });
 
+  it('loadConfig names the file and the fix when config.json is not valid JSON', () => {
+    fs.mkdirSync(configDir(), { recursive: true });
+    const file = path.join(configDir(), 'config.json');
+    fs.writeFileSync(file, '{"version": 2, "wallets": {');
+
+    expect(() => loadConfig()).toThrow(`${file} is not valid JSON`);
+    expect(() => loadConfig()).toThrow('Do not delete it');
+    // The broken file is left as it was
+    expect(fs.readFileSync(file, 'utf-8')).toBe('{"version": 2, "wallets": {');
+  });
+
+  it('loadConfig does not quote the broken text, which may be part of an API key', () => {
+    fs.mkdirSync(configDir(), { recursive: true });
+    fs.writeFileSync(path.join(configDir(), 'config.json'), '{"wallets": {"a": {"api_key": bw_bot_fixture-not-a-real-key}}}');
+
+    expect(() => loadConfig()).toThrow('is not valid JSON');
+    try {
+      loadConfig();
+    } catch (e) {
+      expect((e as Error).message).not.toContain('bw_bot');
+    }
+  });
+
   it('addWallet creates config and sets default', () => {
     addWallet('test-bot', {
       username: 'clever-byte-1234',

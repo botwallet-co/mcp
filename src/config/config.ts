@@ -62,8 +62,19 @@ export function configExists(): boolean {
 }
 
 export function loadConfig(): BotWalletLocalConfig {
-  const raw = fs.readFileSync(configPath(), 'utf-8');
-  const config = JSON.parse(raw) as BotWalletLocalConfig;
+  const file = configPath();
+  const raw = fs.readFileSync(file, 'utf-8');
+  let config: BotWalletLocalConfig;
+  try {
+    config = JSON.parse(raw) as BotWalletLocalConfig;
+  } catch {
+    // The parser's message can quote the text around the error, which may be
+    // part of an API key, so it stays out of what the agent sees
+    throw new Error(
+      `${file} is not valid JSON. ` +
+      'Fix the file or restore it from a backup. Do not delete it: it lists your wallets and where their Key 1 files are.',
+    );
+  }
   if (!config.wallets) config.wallets = {};
   if (!config.version) config.version = CONFIG_VERSION;
   return config;

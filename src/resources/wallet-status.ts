@@ -1,4 +1,4 @@
-import type { BotWallet } from '../sdk/index.js';
+import { BotWalletError, type BotWallet } from '../sdk/index.js';
 import type { ConfigContext } from '../types.js';
 import { seedExists } from '../config/index.js';
 import { formatUsd } from '../utils/format.js';
@@ -58,7 +58,11 @@ export async function getWalletStatus(
     sdk.balance(),
   ]);
   if (infoResult.status === 'rejected') {
-    return `Wallet status unavailable: ${errorMessage(infoResult.reason)}`;
+    const reason = infoResult.reason;
+    const unavailable = `Wallet status unavailable: ${errorMessage(reason)}`;
+    return reason instanceof BotWalletError && reason.howToFix
+      ? `${unavailable}\nNext Step: ${reason.howToFix}`
+      : unavailable;
   }
 
   const info = infoResult.value as unknown as Record<string, unknown>;

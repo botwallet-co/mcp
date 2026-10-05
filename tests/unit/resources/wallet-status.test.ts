@@ -112,11 +112,20 @@ describe('botwallet://status', () => {
     expect(text).toContain(`Deposit Address: ${DEPOSIT}`);
   });
 
-  it('when the wallet info fails, says the status is unavailable and why', async () => {
-    const sdk = mockSdk(() => Promise.reject(new UnauthorizedError('Invalid API key')), notClaimed);
+  it('when the wallet info fails, says the status is unavailable, why, and what to do', async () => {
+    const error = new UnauthorizedError('Invalid API key');
+    const sdk = mockSdk(() => Promise.reject(error), notClaimed);
 
     const text = await getWalletStatus(sdk, CONFIG);
 
-    expect(text).toBe('Wallet status unavailable: Invalid API key');
+    expect(text).toBe(`Wallet status unavailable: Invalid API key\nNext Step: ${error.howToFix}`);
+  });
+
+  it('leaves out the next step when the error has none', async () => {
+    const sdk = mockSdk(() => Promise.reject(new Error('socket hang up')), notClaimed);
+
+    const text = await getWalletStatus(sdk, CONFIG);
+
+    expect(text).toBe('Wallet status unavailable: socket hang up');
   });
 });
