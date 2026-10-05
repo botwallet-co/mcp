@@ -14,14 +14,13 @@ import {
   NetworkError,
   TimeoutError,
 } from './errors.js';
+import { USER_AGENT } from '../utils/user-agent.js';
 
 import type {
   BotWalletConfig,
   ApiErrorResponse,
   // Basics
   PingResponse,
-  RegisterParams,
-  RegisterResponse,
   InfoResponse,
   BalanceResponse,
   UpdateOwnerParams,
@@ -88,8 +87,6 @@ import type {
   DkgCompleteParams,
   DkgCompleteResponse,
   // x402
-  X402DiscoverParams,
-  X402DiscoverResponse,
   X402PrepareParams,
   X402PrepareResponse,
   X402ConfirmParams,
@@ -110,10 +107,70 @@ import type {
 
 // Default API URL
 // Override via:
-//   - BotWalletConfig.baseUrl
+//   - BotWalletConfig.baseUrl (the MCP server passes resolveBaseUrl(): the
+//     BOTWALLET_API_URL or BOTWALLET_BASE_URL environment variable, then
+//     base_url in ~/.botwallet/config.json, as the CLI reads it)
 //   - BOTWALLET_API_URL environment variable
 const DEFAULT_BASE_URL = 'https://api.botwallet.co/v1';
 const DEFAULT_TIMEOUT = 30000;
+
+/**
+ * Guard-rail codes the API has used. Current servers also add a guard_rail
+ * object to every guard-rail block, which handleApiError checks too; the
+ * older names stay so replies from older servers keep their type.
+ */
+const GUARD_RAIL_CODES = new Set([
+  // Sent today (withdrawals and paylinks). WALLET_SUSPENDED also answers
+  // (HTTP 403) every confirm and signing call while the owner has frozen the
+  // wallet, before anything changes.
+  'WALLET_SUSPENDED',
+  'ALLOW_WITHDRAWAL_REQUESTS',
+  'MAX_WITHDRAWAL',
+  'WITHDRAWAL_APPROVAL_REQUIRED',
+  'ALLOW_PAYLINKS',
+  'MAX_PAYLINK_AMOUNT',
+  // Older names
+  'DAILY_LIMIT',
+  'MAX_PER_TRANSACTION',
+  'ALLOW_BOT_PAYMENTS',
+  'BOT_WHITELIST',
+  'MERCHANT_BLACKLIST',
+  'MERCHANT_WHITELIST',
+  'ALLOW_WITHDRAWALS',
+  'MIN_WITHDRAWAL',
+  'WITHDRAWAL_WHITELIST',
+  'ALLOW_PAYMENT_REQUESTS',
+  'MAX_PAYMENT_REQUEST',
+]);
+
+/**
+ * The next step for codes newer servers send, for a reply without a
+ * how_to_fix of its own. A reply's own how_to_fix is always kept.
+ */
+const DEFAULT_HOW_TO_FIX = new Map<string, string>([
+  ['WALLET_SUSPENDED', 'Your owner has frozen this wallet, so it can\'t send money. Ask them to unfreeze it in the ' +
+    'Botwallet dashboard, then try again.'],
+  ['IDEMPOTENCY_KEY_CONFLICT', 'If you are retrying the same request, call the same tool again with the same arguments ' +
+    'and idempotency_key to get its result. Otherwise leave idempotency_key out, and a new one is made.'],
+  ['DEPRECATED', 'Botwallet no longer supports what this version of the MCP server asked for. Ask your human to update ' +
+    '@botwallet/mcp to the latest version and restart it.'],
+  ['SIGNING_IN_PROGRESS', 'It is being sent right now, so do not pay again. Check botwallet_list_payments (or ' +
+    'botwallet_get_withdrawal for a withdrawal) in about a minute.'],
+  ['SUBMISSION_UNCONFIRMED', 'It was sent and may still go through, so do not pay again. Check botwallet_list_payments ' +
+    '(or botwallet_get_withdrawal for a withdrawal) in about a minute.'],
+]);
+
+/** Read a USD amount from an error detail field (number or numeric string). */
+function toAmount(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
 
 
 // -----------------------------------------------------------------------------
@@ -195,12 +252,18 @@ export class BotWallet {
     // Build headers
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'User-Agent': USER_AGENT,
     };
 
     if (requiresAuth) {
       if (!this.apiKey) {
+        // Same advice as the CLI's requireAPIKey: pick an existing wallet first
         throw new UnauthorizedError(
-          'API key required. Provide via: new BotWallet({ apiKey: "bw_bot_..." }) or set BOTWALLET_API_KEY environment variable. If you don\'t have a key, call register() first.'
+          'No API key is set, so this MCP server can\'t tell which Botwallet to use.',
+          'If you already have a Botwallet, do not register a new one: pick it with botwallet_wallet_use ' +
+          '(botwallet_wallet_list shows the wallets on this machine), or ask your human to set BOTWALLET_API_KEY ' +
+          'in this MCP server\'s settings or to restore ~/.botwallet from the machine that has the wallet. ' +
+          'Call botwallet_register only if your human wants a brand-new wallet.'
         );
       }
       headers['Authorization'] = `Bearer ${this.apiKey}`;
@@ -273,7 +336,9 @@ export class BotWallet {
     }
   }
 
-  private handleApiError(response: ApiErrorResponse): BotWalletError {
+  private handleApiError(reply: ApiErrorResponse): BotWalletError {
+    const fallback = reply.how_to_fix ? undefined : DEFAULT_HOW_TO_FIX.get(reply.error);
+    const response = fallback ? { ...reply, how_to_fix: fallback } : reply;
     const { error, message, how_to_fix, ...details } = response;
 
     // Special handling for specific error types
@@ -282,32 +347,29 @@ export class BotWallet {
         return new UnauthorizedError(message);
 
       case 'INSUFFICIENT_FUNDS':
+        // Payments report `balance` / `required`; withdrawals report
+        // `balance_usdc` / `required_usdc`. Accept either shape.
         return new InsufficientFundsError(
-          details.balance as number,
-          details.required as number,
-          details.funding_url as string | undefined
+          toAmount(details.balance ?? details.balance_usdc),
+          toAmount(details.required ?? details.required_usdc),
+          details.funding_url as string | undefined,
+          { message, howToFix: how_to_fix, details }
         );
 
       case 'RECIPIENT_NOT_FOUND':
-        return new RecipientNotFoundError(details.username as string || 'unknown');
+        return new RecipientNotFoundError(
+          typeof details.username === 'string' && details.username ? details.username : undefined,
+          { message, howToFix: how_to_fix, details }
+        );
 
-      case 'DAILY_LIMIT':
-      case 'MAX_PER_TRANSACTION':
-      case 'ALLOW_BOT_PAYMENTS':
-      case 'BOT_WHITELIST':
-      case 'MERCHANT_BLACKLIST':
-      case 'MERCHANT_WHITELIST':
-      case 'ALLOW_WITHDRAWALS':
-      case 'WITHDRAWAL_APPROVAL_REQUIRED':
-      case 'MIN_WITHDRAWAL':
-      case 'MAX_WITHDRAWAL':
-      case 'WITHDRAWAL_WHITELIST':
-      case 'ALLOW_PAYMENT_REQUESTS':
-      case 'MAX_PAYMENT_REQUEST':
-        return new GuardRailError(error.toLowerCase(), message, details);
-
-      default:
+      default: {
+        // Keep the server's how_to_fix: it tells the agent to ask the owner
+        const guardRail = details.guard_rail;
+        if (GUARD_RAIL_CODES.has(error) || (typeof guardRail === 'object' && guardRail !== null)) {
+          return new GuardRailError(error.toLowerCase(), message, details, how_to_fix);
+        }
         return BotWalletError.fromResponse(response);
+      }
     }
   }
 
@@ -331,6 +393,13 @@ export class BotWallet {
   }
 
   /**
+   * The API key requests are sent with (a secret: never put it in output)
+   */
+  getApiKey(): string | undefined {
+    return this.apiKey || undefined;
+  }
+
+  /**
    * Get the configured base URL
    */
   getBaseUrl(): string {
@@ -347,15 +416,6 @@ export class BotWallet {
    */
   async ping(): Promise<PingResponse> {
     return this.request<PingResponse>('ping', undefined, { requiresAuth: false });
-  }
-
-  /**
-   * Register a new wallet
-   * @param params - Registration parameters
-   * @returns New wallet details including API key (save this!)
-   */
-  async register(params: RegisterParams): Promise<RegisterResponse> {
-    return this.request<RegisterResponse>('register', params, { requiresAuth: false });
   }
 
   /**
@@ -657,14 +717,6 @@ export class BotWallet {
   // ---------------------------------------------------------------------------
   // x402 PAID APIs
   // ---------------------------------------------------------------------------
-
-  /**
-   * Discover x402 paid APIs from the catalog or Coinbase Bazaar
-   * @param params - Search query and source
-   */
-  async x402Discover(params?: X402DiscoverParams): Promise<X402DiscoverResponse> {
-    return this.request<X402DiscoverResponse>('x402_discover', params);
-  }
 
   /**
    * Prepare an x402 payment intent

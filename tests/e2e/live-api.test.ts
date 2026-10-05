@@ -1,4 +1,6 @@
 // End-to-end tests against the real BotWallet API (api.botwallet.co).
+// Not part of `npm test`: run them with `npm run test:e2e` (vitest.config.ts).
+// They make no payments; the authenticated part needs BOTWALLET_E2E_API_KEY.
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';

@@ -41,8 +41,6 @@ export type {
   
   // Basics
   PingResponse,
-  RegisterParams,
-  RegisterResponse,
   InfoResponse,
   BalanceResponse,
   UpdateOwnerParams,
@@ -132,8 +130,6 @@ export type {
   FrostSignCompleteResponse,
   
   // x402
-  X402DiscoverParams,
-  X402DiscoverResponse,
   X402PrepareParams,
   X402PrepareResponse,
   X402ConfirmParams,

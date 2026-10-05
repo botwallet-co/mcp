@@ -2,6 +2,7 @@ export {
   configDir,
   configPath,
   seedsDir,
+  seedFileValue,
   configExists,
   loadConfig,
   saveConfig,
@@ -10,15 +11,24 @@ export {
   listWallets,
   addWallet,
   setDefaultWallet,
-  resolveApiKey,
-  resolveWalletName,
+  sanitizeWalletName,
+  generateLocalName,
+  resolveWallet,
+  resolveBaseUrl,
+  envOverrideNote,
   type WalletEntry,
   type BotWalletLocalConfig,
+  type AddWalletOptions,
+  type AddWalletResult,
+  type ResolvedWallet,
 } from './config.js';
 
 export {
+  seedFilePath,
   seedExists,
   saveSeed,
+  removeNewSeed,
+  savePendingSeed,
   loadSeed,
 } from './seeds.js';
 
@@ -27,5 +37,19 @@ export {
   readBwlt,
   encryptPayload,
   decryptPayload,
+  encodeBwltPayload,
+  parseBwltPayload,
+  BwltPayloadError,
+  BWLT_PAYLOAD_VERSION,
   type BwltContents,
+  type BwltPayload,
 } from './bwlt.js';
+
+export {
+  backupNoncePath,
+  generateBackupCode,
+  writeBackupNonce,
+  checkBackupCode,
+  BACKUP_CODE_TTL_MS,
+  type BackupCodeCheck,
+} from './backup-nonce.js';

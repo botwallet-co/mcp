@@ -1,11 +1,13 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../types.js';
+import { READ_ONLY, CREATES } from '../utils/annotations.js';
 import { formatResult } from '../utils/format.js';
 import { formatToolError } from '../utils/errors.js';
 import { AmountSchema, PaginationSchema } from '../utils/schemas.js';
 
 const getDepositAddress: ToolDefinition = {
   name: 'botwallet_get_deposit_address',
+  annotations: READ_ONLY,
   description:
     'Get your USDC deposit address on Solana. Anyone can send USDC to this address to fund your wallet. ' +
     'Also returns a funding URL for the owner portal.',
@@ -22,6 +24,7 @@ const getDepositAddress: ToolDefinition = {
 
 const requestFunds: ToolDefinition = {
   name: 'botwallet_request_funds',
+  annotations: CREATES,
   description:
     'Request funds from your human owner. Sends a notification with the amount and reason. ' +
     'Use this when your balance is too low to complete a task.',
@@ -49,6 +52,7 @@ const ListFundRequestsSchema = PaginationSchema.extend({
 
 const listFundRequests: ToolDefinition = {
   name: 'botwallet_list_fund_requests',
+  annotations: READ_ONLY,
   description: 'List your fund requests with status (pending, funded, dismissed). Supports pagination.',
   inputSchema: ListFundRequestsSchema,
   async handler(args, ctx) {

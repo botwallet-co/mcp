@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../types.js';
+import { READ_ONLY, CREATES, REACHES_OUT, CANNOT_UNDO } from '../utils/annotations.js';
 import { formatResult } from '../utils/format.js';
 import { formatToolError } from '../utils/errors.js';
 import { AmountSchema, PaginationSchema } from '../utils/schemas.js';
@@ -13,6 +14,7 @@ const LineItemSchema = z.object({
 
 const createPaylink: ToolDefinition = {
   name: 'botwallet_create_paylink',
+  annotations: CREATES,
   description:
     'Create a payment request (paylink) that someone can pay. ' +
     'Returns a payment URL and short code that you can share or send via botwallet_send_paylink. ' +
@@ -70,6 +72,7 @@ const createPaylink: ToolDefinition = {
 
 const sendPaylink: ToolDefinition = {
   name: 'botwallet_send_paylink',
+  annotations: REACHES_OUT,
   description:
     'Send a paylink to a specific recipient. Use after botwallet_create_paylink to deliver the payment request ' +
     'via email (for humans) or directly to a bot wallet inbox (for agents). ' +
@@ -97,6 +100,7 @@ const sendPaylink: ToolDefinition = {
 
 const getPaylink: ToolDefinition = {
   name: 'botwallet_get_paylink',
+  annotations: READ_ONLY,
   description: 'Get the status of a payment request by ID or reference. Shows if it has been paid.',
   inputSchema: z.object({
     request_id: z.string().optional()
@@ -124,6 +128,7 @@ const ListPaylinksSchema = PaginationSchema.extend({
 
 const listPaylinks: ToolDefinition = {
   name: 'botwallet_list_paylinks',
+  annotations: READ_ONLY,
   description:
     'List your payment requests (paylinks) — these are requests YOU created to receive money. ' +
     'Filter by status to find pending, completed, or expired paylinks. ' +
@@ -142,6 +147,7 @@ const listPaylinks: ToolDefinition = {
 
 const cancelPaylink: ToolDefinition = {
   name: 'botwallet_cancel_paylink',
+  annotations: CANNOT_UNDO,
   description: 'Cancel a pending payment request. Only pending paylinks can be cancelled — paid or expired paylinks cannot.',
   inputSchema: z.object({
     request_id: z.string().describe('Payment request ID to cancel'),

@@ -41,35 +41,6 @@ export interface PingResponse {
   version: string;
 }
 
-export interface RegisterParams {
-  /** Display name for your bot (required, 2-50 chars) */
-  name: string;
-  /** Agent model identifier (e.g., 'gpt-4', 'claude-3') */
-  agent_model?: string;
-  /** Owner's email - wallet will appear in their portal when they sign up */
-  owner_email?: string;
-  /** Bot's Solana public key (required — CLI generates keypair locally via FROST DKG) */
-  public_key: string;
-}
-
-export interface RegisterResponse {
-  wallet_id: string;
-  username: string;
-  api_key: string;
-  deposit_address: string;
-  funding_url: string;
-  claim_code: string;
-  claim_url: string;
-  claim_expires_at: string;
-  message: string;
-  /** Email the wallet is pledged to (if owner_email was provided) */
-  pledged_to?: string;
-  /** Whether the owner email exists in the system */
-  owner_found?: boolean;
-  /** Whether the owner was notified (if they exist) */
-  owner_notified?: boolean;
-}
-
 export interface UpdateOwnerParams {
   /** New owner's email address */
   owner_email: string;
@@ -97,6 +68,16 @@ export interface InfoResponse {
   last_active_at: string | null;
   low_balance?: boolean;
   low_balance_threshold?: number;
+  /** When `balance` was last read from the chain */
+  balance_cached_at?: string;
+  // Set while the wallet is unclaimed or abandoned
+  claim_url?: string;
+  claim_code?: string;
+  /** Unclaimed wallets only */
+  claim_expires_at?: string;
+  pledged_to?: string | null;
+  claim_instructions?: string;
+  abandoned?: boolean;
 }
 
 export interface BalanceResponse {
@@ -718,6 +699,10 @@ export interface X402PrepareParams {
   amount: string;
   network: string;
   method: string;
+  /** The token mint the API priced in, from its payment option. Servers that don't know it ignore it. */
+  asset?: string;
+  /** The payment option's x402 scheme ("exact"). Servers that don't know it ignore it. */
+  scheme?: string;
 }
 
 export interface X402PrepareResponse {
@@ -776,23 +761,6 @@ export interface X402SettleResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Response Types - x402 Discovery
-// -----------------------------------------------------------------------------
-
-export interface X402DiscoverParams {
-  query?: string;
-  source?: 'catalog' | 'bazaar';
-  limit?: number;
-  offset?: number;
-}
-
-export interface X402DiscoverResponse {
-  apis: Record<string, unknown>[];
-  total: number;
-  [key: string]: unknown;
-}
-
-// -----------------------------------------------------------------------------
 // Response Types - Wallet Transfer
 // -----------------------------------------------------------------------------
 
@@ -806,8 +774,8 @@ export interface WalletImportKeyParams {
 }
 
 export interface WalletImportKeyResponse {
+  // Only the decryption key: the API key travels inside the encrypted file
   encryption_key: string;
-  api_key?: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -833,9 +801,17 @@ export type BotWalletErrorCode =
   | 'MAX_PER_TRANSACTION'
   | 'APPROVAL_REQUIRED'
   | 'WALLET_SUSPENDED'
+  | 'ALLOW_WITHDRAWAL_REQUESTS'
+  | 'MAX_WITHDRAWAL'
+  | 'ALLOW_PAYLINKS'
+  | 'MAX_PAYLINK_AMOUNT'
   | 'EXPIRED'
   | 'INVALID_STATUS'
   | 'DUPLICATE_REQUEST'
+  | 'IDEMPOTENCY_KEY_CONFLICT'
+  | 'DEPRECATED'
+  | 'SIGNING_IN_PROGRESS'
+  | 'SUBMISSION_UNCONFIRMED'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
   | 'TIMEOUT';

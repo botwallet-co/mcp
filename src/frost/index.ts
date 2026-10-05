@@ -22,6 +22,8 @@ export {
 export {
   frostSignAndSubmit,
   frostSignForX402,
+  SubmitOutcomeUnknownError,
+  type SigningCheck,
 } from './signing.js';
 
 export type {

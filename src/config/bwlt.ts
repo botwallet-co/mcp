@@ -1,6 +1,7 @@
 // .bwlt encrypted wallet export/import format.
 //
-// Port of packages/cli-go/config/bwlt.go + crypto.go
+// Port of packages/cli-go/config/bwlt.go + crypto.go, and of the JSON payload
+// built by `botwallet wallet export` (packages/cli-go/cmd/wallet.go).
 //
 // Binary format:
 //   Bytes 0-3:   Magic "BWLT" (0x42, 0x57, 0x4C, 0x54)
@@ -12,6 +13,8 @@
 
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
+import { base58 } from '@scure/base';
+import { keyShareFromMnemonic } from '../frost/encoding.js';
 
 const BWLT_MAGIC = Uint8Array.from([0x42, 0x57, 0x4C, 0x54]); // "BWLT"
 const BWLT_VERSION = 0x01;
@@ -28,7 +31,8 @@ export interface BwltContents {
 }
 
 /**
- * Write an encrypted wallet export to a .bwlt file.
+ * Write an encrypted wallet export to a new .bwlt file.
+ * Never replaces an existing file: fails with EEXIST instead.
  */
 export function writeBwlt(
   filePath: string,
@@ -63,7 +67,7 @@ export function writeBwlt(
   // Ciphertext (includes GCM auth tag)
   buf.set(ciphertext, offset);
 
-  fs.writeFileSync(filePath, buf, { mode: 0o600 });
+  fs.writeFileSync(filePath, buf, { mode: 0o600, flag: 'wx' });
 }
 
 /**
@@ -150,4 +154,107 @@ export function decryptPayload(
 
   const plaintext = Buffer.concat([decipher.update(encData), decipher.final()]);
   return Uint8Array.from(plaintext);
+}
+
+// -----------------------------------------------------------------------------
+// Payload
+// -----------------------------------------------------------------------------
+// The decrypted JSON. Same shape as the CLI's export (cmd/wallet.go), whose
+// import refuses a file without api_key, seed, username or public_key, so
+// every export must carry all of them.
+
+export const BWLT_PAYLOAD_VERSION = 1;
+
+export interface BwltPayload {
+  version: number;
+  /** Display name; the importer derives its local wallet name from it. */
+  wallet_name: string;
+  username: string;
+  api_key: string;
+  /** The wallet's Solana address (the FROST group key), base58. */
+  public_key: string;
+  /** Key 1: the 12-word mnemonic. */
+  seed: string;
+  exported_at: string;
+}
+
+/** Thrown when a decrypted .bwlt payload is unusable. */
+export class BwltPayloadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BwltPayloadError';
+  }
+}
+
+/** Join the words of a mnemonic with single spaces. */
+function normalizeMnemonic(mnemonic: string): string {
+  return mnemonic.trim().split(/\s+/).join(' ');
+}
+
+function isSolanaAddress(value: string): boolean {
+  try {
+    return base58.decode(value).length === 32;
+  } catch {
+    return false;
+  }
+}
+
+/** Encode an export payload as the CLI does (exported_at in RFC 3339, UTC). */
+export function encodeBwltPayload(fields: Omit<BwltPayload, 'version' | 'exported_at'>): Uint8Array {
+  const payload: BwltPayload = {
+    version: BWLT_PAYLOAD_VERSION,
+    wallet_name: fields.wallet_name,
+    username: fields.username,
+    api_key: fields.api_key,
+    public_key: fields.public_key,
+    seed: normalizeMnemonic(fields.seed),
+    exported_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  };
+  return new TextEncoder().encode(JSON.stringify(payload));
+}
+
+/**
+ * Parse and check a decrypted payload before anything is written to disk.
+ * Accepts files from the CLI and from this server; rejects files written by
+ * older MCP versions, which left out the API key, username and address.
+ */
+export function parseBwltPayload(plaintext: Uint8Array): BwltPayload {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    throw new BwltPayloadError('The wallet data in this .bwlt file could not be read. The file may be corrupted; export the wallet again.');
+  }
+  const obj = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const text = (key: string) => (typeof obj[key] === 'string' ? (obj[key] as string).trim() : '');
+
+  const payload: BwltPayload = {
+    version: typeof obj.version === 'number' ? obj.version : 0,
+    wallet_name: text('wallet_name'),
+    username: text('username'),
+    api_key: text('api_key'),
+    public_key: text('public_key'),
+    seed: normalizeMnemonic(text('seed')),
+    exported_at: text('exported_at'),
+  };
+
+  if (!payload.api_key || !payload.seed || !payload.username || !payload.public_key) {
+    throw new BwltPayloadError(
+      'This .bwlt file is missing the wallet\'s API key, username or address. ' +
+      'Files exported by older versions of the Botwallet MCP server are incomplete. ' +
+      'Update the MCP server (or use the Botwallet CLI) on the machine that has the wallet and export it again.'
+    );
+  }
+
+  try {
+    keyShareFromMnemonic(payload.seed);
+  } catch {
+    throw new BwltPayloadError('The key share in this .bwlt file is not a valid 12-word phrase. Export the wallet again.');
+  }
+
+  if (!isSolanaAddress(payload.public_key)) {
+    throw new BwltPayloadError('The wallet address in this .bwlt file is not valid. Export the wallet again.');
+  }
+
+  return payload;
 }

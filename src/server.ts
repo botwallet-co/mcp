@@ -4,6 +4,7 @@ import type { ConfigContext, ToolContext } from './types.js';
 import { ALL_TOOLS } from './tools/index.js';
 import { getWalletStatus } from './resources/index.js';
 import { formatToolError } from './utils/errors.js';
+import { MCP_VERSION } from './utils/version.js';
 
 /**
  * Create a configured MCP server.
@@ -13,7 +14,7 @@ export function createServer(sdk: BotWallet, config: ConfigContext): McpServer {
   const server = new McpServer(
     {
       name: 'BotWallet',
-      version: '0.2.0',
+      version: MCP_VERSION,
     },
     {
       capabilities: {
@@ -27,10 +28,13 @@ export function createServer(sdk: BotWallet, config: ConfigContext): McpServer {
 
   // Register all tools — pass Zod shapes so the SDK handles validation and JSON Schema conversion
   for (const tool of ALL_TOOLS) {
-    server.tool(
+    server.registerTool(
       tool.name,
-      tool.description,
-      tool.inputSchema.shape,
+      {
+        description: tool.description,
+        inputSchema: tool.inputSchema.shape,
+        annotations: tool.annotations,
+      },
       async (args: Record<string, unknown>) => {
         try {
           return await tool.handler(args, ctx);
@@ -45,7 +49,10 @@ export function createServer(sdk: BotWallet, config: ConfigContext): McpServer {
   server.resource(
     'wallet-status',
     'botwallet://status',
-    { description: 'Current wallet status: balance, limits, deposit address, and local key share status.' },
+    {
+      description: 'Current wallet status: balance, limits, deposit address, local key share status, ' +
+        'and the claim link while no human owner has claimed the wallet.',
+    },
     async () => ({
       contents: [{
         uri: 'botwallet://status',

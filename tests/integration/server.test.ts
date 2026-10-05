@@ -1,16 +1,30 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+// The MCP server over an in-memory transport. Offline: fetch is stubbed and
+// no API key from the environment is used (tests/e2e covers the live API).
+
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { BotWallet } from '../../src/sdk/index.js';
 import { createServer } from '../../src/server.js';
 import type { ConfigContext } from '../../src/types.js';
+import { MCP_VERSION } from '../../src/utils/version.js';
+import { readFileSync } from 'node:fs';
 
 describe('MCP server integration', () => {
   let client: Client;
+  const fetchMock = vi.fn(async () => Response.json({
+    success: true,
+    data: { ok: true, timestamp: '2026-10-04T00:00:00.000Z', version: 'test' },
+  }));
 
   beforeAll(async () => {
-    // Create SDK instance (no API key — only ping works without auth)
-    const sdk = new BotWallet();
+    // A key set on the developer's machine would otherwise be picked up
+    vi.stubEnv('BOTWALLET_API_KEY', '');
+    vi.stubEnv('BW_API_KEY', '');
+    vi.stubGlobal('fetch', fetchMock);
+
+    // No API key: only ping works without auth
+    const sdk = new BotWallet({ baseUrl: 'https://api.example.test/v1' });
 
     const config: ConfigContext = {
       walletName: undefined,
@@ -32,6 +46,18 @@ describe('MCP server integration', () => {
       server.connect(serverTransport),
       client.connect(clientTransport),
     ]);
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('reports the package version in the handshake', () => {
+    expect(client.getServerVersion()?.version).toBe(MCP_VERSION);
+    // The release script bumps both; a mismatch means it missed one
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'));
+    expect(MCP_VERSION).toBe(pkg.version);
   });
 
   it('lists all 36 tools', async () => {
@@ -92,26 +118,73 @@ describe('MCP server integration', () => {
     expect(names).toEqual(expected);
   });
 
+  it('tells clients which tools only read and which move money or touch Key 1', async () => {
+    const { tools } = await client.listTools();
+    const hints = new Map(tools.map(t => [t.name, t.annotations]));
+
+    for (const tool of tools) {
+      expect(tool.annotations, tool.name).toBeDefined();
+      expect(typeof tool.annotations?.readOnlyHint, tool.name).toBe('boolean');
+    }
+
+    // Clients may run these without asking
+    const readOnly = tools.filter(t => t.annotations?.readOnlyHint === true).map(t => t.name).sort();
+    expect(readOnly).toEqual([
+      'botwallet_approval_status',
+      'botwallet_balance',
+      'botwallet_can_i_afford',
+      'botwallet_get_deposit_address',
+      'botwallet_get_paylink',
+      'botwallet_get_withdrawal',
+      'botwallet_info',
+      'botwallet_list_fund_requests',
+      'botwallet_list_paylinks',
+      'botwallet_list_payments',
+      'botwallet_lookup',
+      'botwallet_my_limits',
+      'botwallet_pending_approvals',
+      'botwallet_ping',
+      'botwallet_transactions',
+      'botwallet_wallet_list',
+      'botwallet_x402_discover',
+    ]);
+
+    // Clients should ask before these
+    for (const name of [
+      'botwallet_pay',
+      'botwallet_confirm_payment',
+      'botwallet_withdraw',
+      'botwallet_confirm_withdrawal',
+      'botwallet_x402_pay_and_fetch',
+      'botwallet_wallet_backup',
+      'botwallet_wallet_export',
+      'botwallet_wallet_import',
+      'botwallet_update_owner',
+    ]) {
+      expect(hints.get(name)?.readOnlyHint, name).toBe(false);
+      expect(hints.get(name)?.destructiveHint, name).toBe(true);
+    }
+
+    // Calls URLs the agent chooses, so it is not read-only either
+    expect(hints.get('botwallet_x402_fetch')).toMatchObject({ readOnlyHint: false, openWorldHint: true });
+  });
+
   it('lists resources', async () => {
     const result = await client.listResources();
     expect(result.resources.length).toBe(1);
     expect(result.resources[0].uri).toBe('botwallet://status');
   });
 
-  it('botwallet_ping returns a response', async () => {
+  it('botwallet_ping returns the API\'s answer, unwrapped', async () => {
     const result = await client.callTool({
       name: 'botwallet_ping',
       arguments: {},
     });
 
-    // Ping may succeed or fail depending on network — verify it returns structured content
+    expect(result.isError).toBeFalsy();
     const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(text).toBeTruthy();
-    // If it succeeded, it should be valid JSON
-    if (!result.isError) {
-      const parsed = JSON.parse(text);
-      expect(parsed).toBeDefined();
-    }
+    expect(JSON.parse(text)).toMatchObject({ ok: true, version: 'test' });
+    expect(fetchMock).toHaveBeenCalledWith('https://api.example.test/v1/bot', expect.anything());
   });
 
   it('botwallet_wallet_list returns no-config error when unconfigured', async () => {

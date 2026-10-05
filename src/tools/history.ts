@@ -1,11 +1,13 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../types.js';
+import { READ_ONLY, UPDATES } from '../utils/annotations.js';
 import { formatResult } from '../utils/format.js';
 import { formatToolError } from '../utils/errors.js';
 import { PaginationSchema } from '../utils/schemas.js';
 
 const transactions: ToolDefinition = {
   name: 'botwallet_transactions',
+  annotations: READ_ONLY,
   description:
     'View the full transaction ledger: all completed money movements including payments sent, ' +
     'payments received, deposits, withdrawals, fees, and refunds. Filter by direction (in/out). ' +
@@ -28,6 +30,7 @@ const transactions: ToolDefinition = {
 
 const myLimits: ToolDefinition = {
   name: 'botwallet_my_limits',
+  annotations: READ_ONLY,
   description:
     'View all guard rails set by the wallet owner: spending limits (per-transaction, daily), ' +
     'recipient restrictions (whitelists/blacklists), earning limits, and withdrawal rules. ' +
@@ -45,6 +48,7 @@ const myLimits: ToolDefinition = {
 
 const pendingApprovals: ToolDefinition = {
   name: 'botwallet_pending_approvals',
+  annotations: READ_ONLY,
   description:
     'List actions waiting for owner approval (payments and withdrawals). ' +
     'Shows approval URLs so the owner can act on them.',
@@ -61,6 +65,7 @@ const pendingApprovals: ToolDefinition = {
 
 const approvalStatus: ToolDefinition = {
   name: 'botwallet_approval_status',
+  annotations: READ_ONLY,
   description:
     'Check the status of a specific approval by ID. Shows if it is pending, approved, rejected, or expired. ' +
     'When approved, includes the tool name and arguments needed to confirm the transaction.',
@@ -97,23 +102,50 @@ const approvalStatus: ToolDefinition = {
   },
 };
 
+// Event types the server filters on (VALID_EVENT_TYPES in
+// supabase/functions/bot/handlers/events.ts). The server ignores any other
+// type, and a filter left with no known type returns every event, so only
+// these are accepted. 'guardrails_updated' is left out: the server accepts it
+// but never records such an event, so filtering on it always comes back empty.
+const EVENT_TYPES = [
+  'approval_required',
+  'approval_resolved',
+  'fund_requested',
+  'fund_request_funded',
+  'fund_request_dismissed',
+  'deposit_received',
+  'payment_completed',
+  'paylink_received',
+  'wallet_pledged',
+  'wallet_claimed',
+  'low_balance',
+  'x402_payment_completed',
+  'x402_payment_failed',
+  'withdrawal_completed',
+] as const;
+
 const events: ToolDefinition = {
   name: 'botwallet_events',
+  // Not read-only: mark_read marks the returned events as read
+  annotations: UPDATES,
   description:
-    'Get wallet notifications/events. Event types include: ' +
-    'approval_resolved, deposit_received, payment_completed, fund_requested, guard_rails_updated. ' +
-    'Set mark_read to true to mark returned events as read.',
+    'Get wallet notifications, newest first. By default only unread events are returned, 10 at a time (25 at most). ' +
+    'Useful types: approval_resolved (your owner approved or rejected a payment or withdrawal), approval_required, ' +
+    'deposit_received, payment_completed, withdrawal_completed, x402_payment_completed, x402_payment_failed, ' +
+    'fund_request_funded, low_balance. ' +
+    'Set unread_only to false to include events already read. ' +
+    'Set mark_read to true to mark the events this call returns as read.',
   inputSchema: z.object({
-    types: z.array(z.string()).optional()
-      .describe('Filter by event types'),
-    limit: z.number().int().min(1).max(100).optional()
-      .describe('Max events to return'),
+    types: z.array(z.enum(EVENT_TYPES)).optional()
+      .describe('Only return events of these types'),
+    limit: z.number().int().min(1).max(25).optional()
+      .describe('Max events to return (default 10, max 25)'),
     unread_only: z.boolean().optional()
-      .describe('Only return unread events'),
+      .describe('Only return unread events. Defaults to true; set false to include events already read.'),
     since: z.string().optional()
       .describe('Only return events after this ISO 8601 timestamp'),
     mark_read: z.boolean().optional()
-      .describe('Mark returned events as read'),
+      .describe('Mark the events this call returns as read (only those, not other unread events)'),
   }),
   async handler(args, ctx) {
     try {
