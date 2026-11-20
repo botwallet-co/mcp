@@ -6,27 +6,20 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-const testHome = path.join(os.tmpdir(), `bw-transfer-test-${Date.now()}`);
-vi.mock('node:os', async () => {
-  const actual = await vi.importActual<typeof import('node:os')>('node:os');
-  return {
-    ...actual,
-    homedir: () => testHome,
-  };
-});
+const testHome = path.join(os.tmpdir(), `bw-wallet-files-test-${Date.now()}`);
+vi.mock('node:os', async () => (await import('../../helpers/temp-home.js')).osWithHome(() => testHome));
 
-import { transferTools } from '../../../src/tools/transfer.js';
+import { walletFileTools } from '../../../src/tools/wallet-files.js';
 import { BotWalletError, type BotWallet } from '../../../src/sdk/index.js';
-import type { ConfigContext, ToolContext, ToolResult } from '../../../src/types.js';
+import type { ConfigContext } from '../../../src/types.js';
 import { addWallet, configDir, getWallet, loadConfig } from '../../../src/config/config.js';
 import { loadSeed, saveSeed } from '../../../src/config/seeds.js';
 import { decryptPayload, encryptPayload, readBwlt, writeBwlt } from '../../../src/config/bwlt.js';
+import { localWallet, OTHER_MNEMONIC, parseResult, TEST_MNEMONIC, toolContext } from '../../helpers/harness.js';
 
-const walletExport = transferTools.find(t => t.name === 'botwallet_wallet_export')!;
-const walletImport = transferTools.find(t => t.name === 'botwallet_wallet_import')!;
+const walletExport = walletFileTools.find(t => t.name === 'botwallet_wallet_export')!;
+const walletImport = walletFileTools.find(t => t.name === 'botwallet_wallet_import')!;
 
-const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
-const OTHER_MNEMONIC = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
 const ADDRESS = '5DewmSGWjgidikL4eH1brrzxA3XG8esJ1fKE11wbtHkd';
 const API_KEY = 'bw_bot_fixture-not-a-real-key';
 const EXPORT_ID = '0f8e4c2a-5b1d-4e6f-9a3c-7d2e1b0a9c8f';
@@ -35,7 +28,7 @@ const KEY = Uint8Array.from(Buffer.from(KEY_B64, 'base64'));
 
 // Written by the CLI's own code: cli-go config.EncryptPayload + config.WriteBWLT,
 // with the payload map and json.Marshal from `botwallet wallet export`
-// (cmd/wallet.go), key bytes 0..31 and the values above:
+// (packages/cli-go/cmd), key bytes 0..31 and the values above:
 // {"api_key":"bw_bot_fixture-not-a-real-key","exported_at":"2026-10-04T12:00:00Z",
 //  "public_key":"5Dewm...tHkd","seed":"abandon ... about","username":"research-bot",
 //  "version":1,"wallet_name":"Research Bot"}
@@ -46,7 +39,7 @@ const GO_EXPORT_BWLT =
   'h+vucoOVOGFkLQ1t//MhjGIJaXccbUiBKZavhVsfu1E+F4lbKN6fxwVMFN3qasT9dI1qtEv2hED9s/46D5VSIR4dZ2GciZJC0m7Bgny8eThv' +
   'T9PZw/Zj5Rur73OG0JAwvBaT/B+Y3DkpPvSDmXfLK/+B2Hq2fu9B/lXoX0VIzLHWedC7f7cMEFo01Q==';
 
-// Fields the CLI's import requires (cmd/wallet.go): it rejects a file missing any of them
+// Fields the CLI's import requires (packages/cli-go/cmd): it rejects a file missing any of them
 const GO_REQUIRED_FIELDS = ['api_key', 'seed', 'username', 'public_key'];
 const GO_PAYLOAD_FIELDS = ['api_key', 'exported_at', 'public_key', 'seed', 'username', 'version', 'wallet_name'];
 
@@ -59,13 +52,7 @@ function mockSdk(methods: Record<string, unknown> = {}): BotWallet {
   } as unknown as BotWallet;
 }
 
-function makeCtx(sdk: BotWallet, config: Partial<ConfigContext> = {}): ToolContext {
-  return { sdk, config: { walletName: undefined, hasConfig: false, hasSeed: false, ...config } };
-}
-
-function parse(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text);
-}
+const makeCtx = (sdk: BotWallet, config: Partial<ConfigContext> = {}) => toolContext(sdk, config);
 
 function writeTestBwlt(name: string, payload: unknown): string {
   const { nonce, ciphertext } = encryptPayload(KEY, new TextEncoder().encode(JSON.stringify(payload)));
@@ -81,7 +68,7 @@ function fullPayload(fields: Record<string, unknown> = {}) {
     username: 'research-bot',
     api_key: API_KEY,
     public_key: ADDRESS,
-    seed: MNEMONIC,
+    seed: TEST_MNEMONIC,
     exported_at: '2026-10-04T12:00:00Z',
     ...fields,
   };
@@ -108,7 +95,7 @@ describe('botwallet_wallet_import', () => {
     const ctx = makeCtx(sdk);
 
     const result = await walletImport.handler({ file_path: file }, ctx);
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBeUndefined();
     expect(out).toMatchObject({
@@ -131,7 +118,7 @@ describe('botwallet_wallet_import', () => {
     });
     // The CLI resolves seed_file relative to ~/.botwallet when signing
     expect(fs.existsSync(path.join(configDir(), config.wallets['research-bot'].seed_file))).toBe(true);
-    expect(loadSeed('research-bot')).toBe(MNEMONIC);
+    expect(loadSeed('research-bot')).toBe(TEST_MNEMONIC);
 
     // Activated for this session, and the API key is not echoed back
     expect(sdk.setApiKey).toHaveBeenCalledWith(API_KEY);
@@ -146,7 +133,7 @@ describe('botwallet_wallet_import', () => {
       seed_file: 'seeds/research-bot.seed', created_at: 'x',
     });
 
-    const out = parse(await walletImport.handler(
+    const out = parseResult(await walletImport.handler(
       { file_path: writeTestBwlt('a.bwlt', fullPayload()) }, makeCtx(mockSdk()),
     ));
 
@@ -155,7 +142,7 @@ describe('botwallet_wallet_import', () => {
     expect(out.note).toContain('previous default was "research-bot"');
     expect(loadSeed('research-bot')).toBe(OTHER_MNEMONIC);
     expect(getWallet('research-bot')!.api_key).toBe('key-original');
-    expect(loadSeed('research-bot-2')).toBe(MNEMONIC);
+    expect(loadSeed('research-bot-2')).toBe(TEST_MNEMONIC);
     expect(getWallet('research-bot-2')!.api_key).toBe(API_KEY);
     expect(loadConfig().default_wallet).toBe('research-bot-2');
   });
@@ -163,15 +150,15 @@ describe('botwallet_wallet_import', () => {
   it('importing the same file twice keeps the first copy intact', async () => {
     const file = writeTestBwlt('a.bwlt', fullPayload());
     await walletImport.handler({ file_path: file }, makeCtx(mockSdk()));
-    const second = parse(await walletImport.handler({ file_path: file }, makeCtx(mockSdk())));
+    const second = parseResult(await walletImport.handler({ file_path: file }, makeCtx(mockSdk())));
 
     expect(second.wallet_name).toBe('research-bot-2');
     expect(getWallet('research-bot')!.api_key).toBe(API_KEY);
-    expect(loadSeed('research-bot')).toBe(MNEMONIC);
+    expect(loadSeed('research-bot')).toBe(TEST_MNEMONIC);
   });
 
   it('keeps a wallet name from the file inside the seeds folder', async () => {
-    const out = parse(await walletImport.handler(
+    const out = parseResult(await walletImport.handler(
       { file_path: writeTestBwlt('a.bwlt', fullPayload({ wallet_name: '../../escaped' })) }, makeCtx(mockSdk()),
     ));
 
@@ -182,7 +169,7 @@ describe('botwallet_wallet_import', () => {
   });
 
   it('uses the name argument like the CLI --name flag', async () => {
-    const out = parse(await walletImport.handler(
+    const out = parseResult(await walletImport.handler(
       { file_path: writeTestBwlt('a.bwlt', fullPayload()), name: 'My Copy' }, makeCtx(mockSdk()),
     ));
 
@@ -192,12 +179,12 @@ describe('botwallet_wallet_import', () => {
 
   it('rejects a file from an older MCP version (no API key) before writing anything', async () => {
     const result = await walletImport.handler({
-      file_path: writeTestBwlt('old.bwlt', { wallet_name: 'trader', seed: MNEMONIC, exported_at: '2026-01-01T00:00:00.000Z' }),
+      file_path: writeTestBwlt('old.bwlt', { wallet_name: 'trader', seed: TEST_MNEMONIC, exported_at: '2026-01-01T00:00:00.000Z' }),
     }, makeCtx(mockSdk()));
 
     expect(result.isError).toBe(true);
-    expect(parse(result).code).toBe('IMPORT_ERROR');
-    expect(parse(result).message).toContain('missing the wallet\'s API key');
+    expect(parseResult(result).code).toBe('IMPORT_ERROR');
+    expect(parseResult(result).message).toContain('missing the wallet\'s API key');
     expect(fs.existsSync(path.join(configDir(), 'config.json'))).toBe(false);
     expect(seedFiles()).toEqual([]);
   });
@@ -217,7 +204,7 @@ describe('botwallet_wallet_import', () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(parse(result).message).toContain('not a valid 12-word phrase');
+    expect(parseResult(result).message).toContain('not a valid 12-word phrase');
     expect(seedFiles()).toEqual([]);
   });
 
@@ -229,7 +216,7 @@ describe('botwallet_wallet_import', () => {
     const result = await walletImport.handler({ file_path: writeTestBwlt('a.bwlt', fullPayload()) }, makeCtx(sdk));
 
     expect(result.isError).toBe(true);
-    expect(parse(result).message).toContain('24 hours');
+    expect(parseResult(result).message).toContain('24 hours');
     expect(seedFiles()).toEqual([]);
   });
 
@@ -248,7 +235,7 @@ describe('botwallet_wallet_import', () => {
 
 describe('botwallet_wallet_export', () => {
   function setUpWallet() {
-    saveSeed('research-bot', MNEMONIC);
+    saveSeed('research-bot', TEST_MNEMONIC);
     addWallet('research-bot', {
       username: 'research-bot', display_name: 'Research Bot', api_key: API_KEY, public_key: ADDRESS,
       seed_file: 'seeds/research-bot.seed', created_at: '2026-10-01T00:00:00Z',
@@ -263,11 +250,11 @@ describe('botwallet_wallet_export', () => {
     });
   }
 
-  const walletCtx = (sdk: BotWallet) => makeCtx(sdk, { walletName: 'research-bot', hasConfig: true, hasSeed: true });
+  const walletCtx = (sdk: BotWallet) => makeCtx(sdk, localWallet('research-bot'));
 
   it('writes the CLI payload with every field the CLI import requires', async () => {
     setUpWallet();
-    const out = parse(await walletExport.handler(
+    const out = parseResult(await walletExport.handler(
       { output_path: path.join(testHome, 'my-wallet') }, walletCtx(exportSdk()),
     ));
 
@@ -289,7 +276,7 @@ describe('botwallet_wallet_export', () => {
       username: 'research-bot',
       api_key: API_KEY,
       public_key: ADDRESS,
-      seed: MNEMONIC,
+      seed: TEST_MNEMONIC,
     });
     expect(payload.exported_at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
   });
@@ -302,7 +289,7 @@ describe('botwallet_wallet_export', () => {
 
     const result = await walletExport.handler({ output_path: existing }, walletCtx(sdk));
 
-    expect(parse(result).code).toBe('FILE_EXISTS');
+    expect(parseResult(result).code).toBe('FILE_EXISTS');
     expect(sdk.walletExport).not.toHaveBeenCalled();
     expect(fs.readFileSync(existing, 'utf-8')).toBe('keep me');
   });
@@ -320,7 +307,7 @@ describe('botwallet_wallet_export', () => {
       path.join(testHome, 'docs', '..', '.botwallet', 'export.bwlt'),
     ]) {
       const result = await walletExport.handler({ output_path: target }, walletCtx(sdk));
-      expect(parse(result).code).toBe('INVALID_PATH');
+      expect(parseResult(result).code).toBe('INVALID_PATH');
     }
 
     expect(sdk.walletExport).not.toHaveBeenCalled();
@@ -331,7 +318,7 @@ describe('botwallet_wallet_export', () => {
   it('accepts a folder whose name only starts like ~/.botwallet', async () => {
     setUpWallet();
     fs.mkdirSync(path.join(testHome, '.botwallet-exports'));
-    const out = parse(await walletExport.handler(
+    const out = parseResult(await walletExport.handler(
       { output_path: path.join(testHome, '.botwallet-exports', 'w.bwlt') }, walletCtx(exportSdk()),
     ));
     expect(out.exported).toBe(true);
@@ -344,18 +331,18 @@ describe('botwallet_wallet_export', () => {
 
     const result = await walletExport.handler({ output_path: path.join(testHome, 'x.bwlt') }, walletCtx(sdk));
 
-    expect(parse(result).code).toBe('WALLET_MISMATCH');
+    expect(parseResult(result).code).toBe('WALLET_MISMATCH');
     expect(sdk.walletExport).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(testHome, 'x.bwlt'))).toBe(false);
   });
 
   it('fills in the username and address of entries left incomplete by older imports', async () => {
-    saveSeed('research-bot', MNEMONIC);
+    saveSeed('research-bot', TEST_MNEMONIC);
     addWallet('research-bot', {
       username: 'Research Bot', api_key: '', public_key: '', seed_file: 'research-bot.seed', created_at: 'x',
     });
 
-    const out = parse(await walletExport.handler(
+    const out = parseResult(await walletExport.handler(
       { output_path: path.join(testHome, 'x.bwlt') }, walletCtx(exportSdk()),
     ));
     const file = readBwlt(out.path);
@@ -366,17 +353,17 @@ describe('botwallet_wallet_export', () => {
 
   it('round-trips: an MCP export imports on a fresh machine with its API key', async () => {
     setUpWallet();
-    const out = parse(await walletExport.handler(
+    const out = parseResult(await walletExport.handler(
       { output_path: path.join(testHome, 'move.bwlt') }, walletCtx(exportSdk()),
     ));
 
     fs.rmSync(configDir(), { recursive: true, force: true });
     const sdk = mockSdk();
-    const imported = parse(await walletImport.handler({ file_path: out.path }, makeCtx(sdk)));
+    const imported = parseResult(await walletImport.handler({ file_path: out.path }, makeCtx(sdk)));
 
     expect(imported.wallet_name).toBe('research-bot');
     expect(getWallet('research-bot')).toMatchObject({ api_key: API_KEY, public_key: ADDRESS, username: 'research-bot' });
-    expect(loadSeed('research-bot')).toBe(MNEMONIC);
+    expect(loadSeed('research-bot')).toBe(TEST_MNEMONIC);
     expect(sdk.setApiKey).toHaveBeenCalledWith(API_KEY);
   });
 });

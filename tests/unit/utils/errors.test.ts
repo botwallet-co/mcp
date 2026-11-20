@@ -3,18 +3,14 @@
 
 import { describe, it, expect } from 'vitest';
 import { noConfigError, noSeedError } from '../../../src/utils/errors.js';
-import type { ToolResult } from '../../../src/types.js';
-
-function parse(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text);
-}
+import { parseResult } from '../../helpers/harness.js';
 
 const tools = (out: Record<string, any>) => (out.options as Array<{ tool: string }>).map(o => o.tool);
 
 describe('noSeedError', () => {
   it('for a known wallet, says which key share is missing and never offers to register', () => {
     const result = noSeedError('make a payment (FROST signing)', 'research-bot');
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBe(true);
     expect(out.code).toBe('NO_LOCAL_SEED');
@@ -27,7 +23,7 @@ describe('noSeedError', () => {
   });
 
   it('without a wallet, offers registering last and only for a brand-new wallet', () => {
-    const out = parse(noSeedError('make a payment (FROST signing)'));
+    const out = parseResult(noSeedError('make a payment (FROST signing)'));
 
     expect(out.message).toContain('no local key share');
     expect(tools(out).at(-1)).toBe('botwallet_register');
@@ -38,7 +34,7 @@ describe('noSeedError', () => {
 
 describe('noConfigError', () => {
   it('points to restoring or importing first, and registering last', () => {
-    const out = parse(noConfigError('list wallets'));
+    const out = parseResult(noConfigError('list wallets'));
 
     expect(out.code).toBe('NO_LOCAL_CONFIG');
     expect(out.message).toContain('no local config found');

@@ -9,46 +9,17 @@
 //
 // DETERMINISM: Same mnemonic always produces the same scalar.
 
-import { sha512 } from '@noble/hashes/sha512';
+import { sha512 } from '@noble/hashes/sha2';
 import { randomBytes } from '@noble/hashes/utils';
 import * as bip39 from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english';
 import { ed25519 } from '@noble/curves/ed25519';
+import { bytesToNumberLE, reduceScalar64 } from './scalar.js';
 import type { KeyShare } from './types.js';
 
-const { ExtendedPoint, CURVE } = ed25519;
-const ORDER = CURVE.n;
+const { ExtendedPoint } = ed25519;
 
 const DOMAIN_SEPARATOR = 'botwallet/frost/v1/key-share';
-
-function mod(a: bigint, m: bigint = ORDER): bigint {
-  const result = a % m;
-  return result >= 0n ? result : result + m;
-}
-
-function bytesToNumberLE(bytes: Uint8Array): bigint {
-  let result = 0n;
-  for (let i = bytes.length - 1; i >= 0; i--) {
-    result = (result << 8n) + BigInt(bytes[i]);
-  }
-  return result;
-}
-
-function numberToBytesLE(n: bigint, len: number): Uint8Array {
-  const result = new Uint8Array(len);
-  let val = n;
-  for (let i = 0; i < len; i++) {
-    result[i] = Number(val & 0xFFn);
-    val >>= 8n;
-  }
-  return result;
-}
-
-function reduceScalar64(bytes: Uint8Array): Uint8Array {
-  if (bytes.length !== 64) throw new Error('reduceScalar64 requires 64 bytes');
-  const n = bytesToNumberLE(bytes);
-  return numberToBytesLE(mod(n), 32);
-}
 
 /**
  * Generate a new random 12-word BIP39 mnemonic for a FROST key share.
@@ -96,13 +67,6 @@ export function keyShareFromMnemonic(mnemonic: string): KeyShare {
 }
 
 /**
- * Encode an Ed25519 point to 32 bytes (compressed form).
- */
-export function encodePoint(point: Uint8Array): Uint8Array {
-  return point;
-}
-
-/**
  * Decode a 32-byte compressed Ed25519 point. Validates it's on the curve.
  */
 export function decodePoint(bytes: Uint8Array): Uint8Array {
@@ -111,30 +75,5 @@ export function decodePoint(bytes: Uint8Array): Uint8Array {
   }
   // Validate by parsing — throws if invalid
   ExtendedPoint.fromHex(bytes);
-  return bytes;
-}
-
-/**
- * Encode an Ed25519 scalar to 32 bytes (little-endian).
- */
-export function encodeScalar(scalar: Uint8Array): Uint8Array {
-  return scalar;
-}
-
-/**
- * Decode a 32-byte little-endian Ed25519 scalar.
- */
-export function decodeScalar(bytes: Uint8Array): Uint8Array {
-  if (bytes.length !== 32) {
-    throw new Error(`frost: scalar must be 32 bytes, got ${bytes.length}`);
-  }
-  return bytes;
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
-  }
   return bytes;
 }

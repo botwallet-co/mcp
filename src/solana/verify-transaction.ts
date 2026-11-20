@@ -30,7 +30,7 @@
 //      itself is not pinned: servers before Oct 2026 paid from the first USDC
 //      account Solana listed for the wallet.
 // transferExpectation turns what the agent agreed to (ExpectedTransfer, from
-// utils/signing-check.ts) into the range and fee cap checked here: the x402
+// transfers/signing-check.ts) into the range and fee cap checked here: the x402
 // rounding allowances, as in the CLI, and a fee ceiling.
 
 import {
@@ -93,10 +93,11 @@ export interface TransferExpectation {
   maxFee: bigint;
 }
 
-// Botwallet's published fees are 1% (at least $0.01) on payments and paid API
-// calls and 3% on withdrawals, plus $0.25 when the recipient's USDC account has
-// to be set up. The ceiling is well above that, so a fee change on the server
-// doesn't stop payments, but a server can't take much more than it quoted.
+// Botwallet's published fees (the ones tools/descriptions.ts tells the agent)
+// are 1% (at least $0.01) on payments and paid API calls and 3% on
+// withdrawals, plus $0.25 when the recipient's USDC account has to be set up.
+// The ceiling is well above that, so a fee change on the server doesn't stop
+// payments, but a server can't take much more than it quoted.
 const FEE_CEILING_BPS: Record<TransferKind, bigint> = { payment: 500n, x402: 500n, withdrawal: 1000n };
 const FEE_ALLOWANCE = 500_000n; // $0.50: room for the minimum fee and account setup
 

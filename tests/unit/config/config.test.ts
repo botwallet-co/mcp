@@ -5,13 +5,7 @@ import * as os from 'node:os';
 
 // Mock os.homedir() to use temp directory
 const testHome = path.join(os.tmpdir(), `bw-test-${Date.now()}`);
-vi.mock('node:os', async () => {
-  const actual = await vi.importActual<typeof import('node:os')>('node:os');
-  return {
-    ...actual,
-    homedir: () => testHome,
-  };
-});
+vi.mock('node:os', async () => (await import('../../helpers/temp-home.js')).osWithHome(() => testHome));
 
 import {
   configDir,
@@ -20,7 +14,6 @@ import {
   saveConfig,
   addWallet,
   getWallet,
-  getDefaultWallet,
   listWallets,
   setDefaultWallet,
   seedFileValue,
@@ -38,9 +31,7 @@ import {
   seedFilePath,
   savePendingSeed,
 } from '../../../src/config/seeds.js';
-
-const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
-const OTHER_MNEMONIC = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
+import { OTHER_MNEMONIC, TEST_MNEMONIC } from '../../helpers/harness.js';
 
 const seedsPath = () => path.join(testHome, '.botwallet', 'seeds');
 
@@ -134,14 +125,11 @@ describe('config', () => {
     expect(getWallet('nonexistent')).toBeUndefined();
   });
 
-  it('getDefaultWallet returns default', () => {
+  it('the first wallet added becomes the default', () => {
     addWallet('bot-a', entry({ username: 'a', api_key: 'key-a' }));
     addWallet('bot-b', entry({ username: 'b', api_key: 'key-b' }));
 
-    const def = getDefaultWallet();
-    expect(def).toBeDefined();
-    // First wallet added becomes default
-    expect(def!.name).toBe('bot-a');
+    expect(loadConfig().default_wallet).toBe('bot-a');
   });
 
   it('setDefaultWallet switches default', () => {
@@ -149,8 +137,7 @@ describe('config', () => {
     addWallet('bot-b', entry({ username: 'b', api_key: 'key-b' }));
 
     setDefaultWallet('bot-b');
-    const def = getDefaultWallet();
-    expect(def!.name).toBe('bot-b');
+    expect(loadConfig().default_wallet).toBe('bot-b');
   });
 
   it('setDefaultWallet rejects missing wallet', () => {
@@ -201,7 +188,7 @@ describe('addWallet never replaces a wallet', () => {
     const result = addWallet('bot-b', entry(), { makeDefault: true });
 
     expect(result).toEqual({ previousDefault: 'bot-a', totalWallets: 2 });
-    expect(getDefaultWallet()!.name).toBe('bot-b');
+    expect(loadConfig().default_wallet).toBe('bot-b');
   });
 
   it('first wallet becomes the default with no previous default', () => {
@@ -212,7 +199,7 @@ describe('addWallet never replaces a wallet', () => {
 
 describe('legacy seed_file repair', () => {
   it('points old "<name>.seed" entries at seeds/ when the file is there', () => {
-    saveSeed('old-bot', MNEMONIC);
+    saveSeed('old-bot', TEST_MNEMONIC);
     saveConfig({
       version: 2,
       default_wallet: 'old-bot',
@@ -260,7 +247,7 @@ describe('local names (port of the CLI rules)', () => {
   });
 
   it('generateLocalName skips names whose seed file exists without a config entry', () => {
-    saveSeed('stray', MNEMONIC);
+    saveSeed('stray', TEST_MNEMONIC);
     expect(generateLocalName('stray')).toBe('stray-2');
   });
 });
@@ -323,7 +310,7 @@ describe('resolveWallet without config.json', () => {
   });
 
   it('env-only setup that pairs the key with a seed file by name', () => {
-    saveSeed('solo', MNEMONIC);
+    saveSeed('solo', TEST_MNEMONIC);
     expect(resolveWallet({ BOTWALLET_API_KEY: 'key-x', BOTWALLET_WALLET: 'solo' }))
       .toEqual({ name: 'solo', apiKey: 'key-x', warnings: [] });
   });
@@ -368,24 +355,24 @@ describe('resolveBaseUrl (same order as GetBaseURL in the CLI)', () => {
 
 describe('seeds', () => {
   it('saveSeed and loadSeed round-trip', () => {
-    saveSeed('test-bot', MNEMONIC);
+    saveSeed('test-bot', TEST_MNEMONIC);
 
     expect(seedExists('test-bot')).toBe(true);
 
     const loaded = loadSeed('test-bot');
-    expect(loaded).toBe(MNEMONIC);
+    expect(loaded).toBe(TEST_MNEMONIC);
   });
 
   it('saveSeed never overwrites an existing key share', () => {
-    saveSeed('trader', MNEMONIC);
+    saveSeed('trader', TEST_MNEMONIC);
 
     expect(() => saveSeed('trader', OTHER_MNEMONIC)).toThrow(/EEXIST/);
-    expect(loadSeed('trader')).toBe(MNEMONIC);
+    expect(loadSeed('trader')).toBe(TEST_MNEMONIC);
   });
 
   it('refuses names that could leave the seeds folder', () => {
     for (const bad of ['../escaped', 'a/b', 'a\\b', '', ' ', '..', '.']) {
-      expect(() => saveSeed(bad, MNEMONIC)).toThrow('Invalid wallet name');
+      expect(() => saveSeed(bad, TEST_MNEMONIC)).toThrow('Invalid wallet name');
       expect(() => loadSeed(bad)).toThrow('Invalid wallet name');
       expect(seedExists(bad)).toBe(false);
     }
@@ -393,17 +380,17 @@ describe('seeds', () => {
   });
 
   it('keeps reading seed files saved under unsanitized names by older versions', () => {
-    fs.writeFileSync(path.join(seedsPath(), 'My Research Wallet.seed'), `${MNEMONIC}\n`);
-    expect(loadSeed('My Research Wallet')).toBe(MNEMONIC);
+    fs.writeFileSync(path.join(seedsPath(), 'My Research Wallet.seed'), `${TEST_MNEMONIC}\n`);
+    expect(loadSeed('My Research Wallet')).toBe(TEST_MNEMONIC);
   });
 
   it('savePendingSeed names the file by the wallet address', () => {
     const address = '5DewmSGWjgidikL4eH1brrzxA3XG8esJ1fKE11wbtHkd';
-    const file = savePendingSeed(address, MNEMONIC);
+    const file = savePendingSeed(address, TEST_MNEMONIC);
 
     expect(file).toBe(path.join(seedsPath(), `.pending-${address}.seed`));
-    expect(fs.readFileSync(file, 'utf-8')).toContain(MNEMONIC);
-    expect(() => savePendingSeed('../not-an-address', MNEMONIC)).toThrow('Invalid wallet address');
+    expect(fs.readFileSync(file, 'utf-8')).toContain(TEST_MNEMONIC);
+    expect(() => savePendingSeed('../not-an-address', TEST_MNEMONIC)).toThrow('Invalid wallet address');
   });
 
   it('seedExists returns false for missing', () => {
@@ -420,11 +407,11 @@ describe('seeds', () => {
       '# BotWallet FROST Key Share',
       '# Wallet: test',
       '',
-      MNEMONIC,
+      TEST_MNEMONIC,
       '',
     ].join('\n'));
 
     const mnemonic = loadSeed('commented');
-    expect(mnemonic).toBe(MNEMONIC);
+    expect(mnemonic).toBe(TEST_MNEMONIC);
   });
 });

@@ -7,7 +7,6 @@ export default defineConfig(({ mode }) => {
   const e2e = mode === 'e2e' || !!process.env.BOTWALLET_E2E;
   return {
     test: {
-      globals: true,
       testTimeout: 30000,
       exclude: e2e ? configDefaults.exclude : [...configDefaults.exclude, 'tests/e2e/**'],
     },

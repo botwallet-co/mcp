@@ -5,17 +5,9 @@ import {
   scalarFromEntropy,
   scalarFromMnemonic,
   keyShareFromMnemonic,
-  encodePoint,
   decodePoint,
 } from '../../../src/frost/encoding.js';
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
-  }
-  return bytes;
-}
+import { hexToBytes } from '../../helpers/hex.js';
 
 describe('FROST encoding', () => {
   it('generateShareMnemonic produces 12 words', () => {
@@ -65,10 +57,9 @@ describe('FROST encoding', () => {
     expect(() => scalarFromMnemonic('invalid words that are not a mnemonic')).toThrow();
   });
 
-  it('encodePoint/decodePoint round-trip', () => {
+  it('decodePoint returns a valid point unchanged', () => {
     const share = keyShareFromMnemonic(generateShareMnemonic());
-    const encoded = encodePoint(share.public);
-    const decoded = decodePoint(encoded);
+    const decoded = decodePoint(share.public);
 
     expect(Buffer.from(decoded).toString('hex'))
       .toBe(Buffer.from(share.public).toString('hex'));

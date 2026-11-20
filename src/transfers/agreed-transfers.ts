@@ -9,10 +9,11 @@
 // tools fall back to the server's own figures, still within the fee ceiling.
 
 export interface AgreedTransfer {
-  /** What the recipient gets, in USDC base units. */
+  /**
+   * What the recipient gets, in USDC base units. Key 1 signs exactly this
+   * amount, without the allowance for x402 prices the server rounds to cents.
+   */
   amount: bigint;
-  /** When true, `amount` is the exact amount rounded up to a whole cent. */
-  amountRoundedUpToCent?: boolean;
   /** The recipient's wallet address, when the agent gave one. */
   recipient?: string;
   /** The fee the agent was quoted, in USDC base units. */

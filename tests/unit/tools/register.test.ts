@@ -8,33 +8,22 @@ import * as os from 'node:os';
 import { base58 } from '@scure/base';
 
 const testHome = path.join(os.tmpdir(), `bw-register-test-${Date.now()}`);
-vi.mock('node:os', async () => {
-  const actual = await vi.importActual<typeof import('node:os')>('node:os');
-  return {
-    ...actual,
-    homedir: () => testHome,
-  };
-});
+vi.mock('node:os', async () => (await import('../../helpers/temp-home.js')).osWithHome(() => testHome));
 
-import { walletTools } from '../../../src/tools/wallet.js';
+import { dkgCompleteRefused, walletTools } from '../../../src/tools/wallet.js';
 import { BotWalletError, NetworkError, type BotWallet, type DkgCompleteParams } from '../../../src/sdk/index.js';
-import type { ToolContext, ToolResult } from '../../../src/types.js';
 import { addWallet, configDir, getWallet, loadConfig } from '../../../src/config/config.js';
 import { loadSeed, saveSeed } from '../../../src/config/seeds.js';
 import { computeGroupKey, generateKeyShare, keyShareFromMnemonic } from '../../../src/frost/index.js';
+import { OTHER_MNEMONIC, parseResult, toolContext } from '../../helpers/harness.js';
 
 const register = walletTools.find(t => t.name === 'botwallet_register')!;
 
-const OTHER_MNEMONIC = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
 const API_KEY = 'bw_bot_register-test-key';
 const serverShare = generateKeyShare();
 
 const seedsDir = () => path.join(configDir(), 'seeds');
 const seedFiles = () => (fs.existsSync(seedsDir()) ? fs.readdirSync(seedsDir()).sort() : []);
-
-function parse(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text);
-}
 
 function readMnemonic(file: string): string {
   return fs.readFileSync(file, 'utf-8').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')).join(' ');
@@ -65,9 +54,7 @@ function mockSdk(dkgComplete: (params: DkgCompleteParams) => unknown): BotWallet
   } as unknown as BotWallet;
 }
 
-function makeCtx(sdk: BotWallet): ToolContext {
-  return { sdk, config: { walletName: undefined, hasConfig: false, hasSeed: false } };
-}
+const makeCtx = (sdk: BotWallet) => toolContext(sdk);
 
 beforeEach(() => {
   fs.mkdirSync(seedsDir(), { recursive: true });
@@ -89,7 +76,7 @@ describe('botwallet_register', () => {
       return completeResult(params);
     });
 
-    const out = parse(await register.handler({ name: 'Research Bot' }, makeCtx(sdk)));
+    const out = parseResult(await register.handler({ name: 'Research Bot' }, makeCtx(sdk)));
 
     expect(pendingAtComplete).toHaveLength(1);
     expect(pendingAtComplete[0]).toMatch(/^\.pending-.+\.seed$/);
@@ -105,7 +92,7 @@ describe('botwallet_register', () => {
     const sdk = mockSdk(completeResult);
     const ctx = makeCtx(sdk);
 
-    const out = parse(await register.handler({ name: 'Research Bot' }, ctx));
+    const out = parseResult(await register.handler({ name: 'Research Bot' }, ctx));
 
     expect(out).toMatchObject({ wallet_name: 'research-bot', is_default: true, previous_default: 'bot-a' });
     const config = loadConfig();
@@ -126,7 +113,7 @@ describe('botwallet_register', () => {
 
   it('saves the API key without putting it in the result', async () => {
     const result = await register.handler({ name: 'Research Bot' }, makeCtx(mockSdk(completeResult)));
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.content[0].text).not.toContain(API_KEY);
     expect(out.api_key).toBeUndefined();
@@ -136,15 +123,30 @@ describe('botwallet_register', () => {
 
   it('removes the saved key share when the server refuses to create the wallet', async () => {
     const sdk = mockSdk(() => {
-      throw new BotWalletError('DKG_VERIFICATION_FAILED' as never, 'Group key mismatch');
+      throw new BotWalletError('DKG_VERIFICATION_FAILED', 'Group key mismatch');
     });
 
     const result = await register.handler({ name: 'Research Bot' }, makeCtx(sdk));
 
     expect(result.isError).toBe(true);
-    expect(parse(result).code).toBe('DKG_VERIFICATION_FAILED');
+    expect(parseResult(result).code).toBe('DKG_VERIFICATION_FAILED');
     expect(seedFiles()).toEqual([]);
     expect(fs.existsSync(path.join(configDir(), 'config.json'))).toBe(false);
+  });
+
+  it('keeps the key share when the server says the group key is already registered', async () => {
+    const sdk = mockSdk(() => {
+      throw new BotWalletError('VALIDATION_ERROR', 'This group key is already registered');
+    });
+
+    const result = await register.handler({ name: 'Research Bot' }, makeCtx(sdk));
+    const out = parseResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(out.code).toBe('REGISTRATION_UNCONFIRMED');
+    const file = out.details.key_share_file as string;
+    expect(fs.existsSync(file)).toBe(true);
+    expect(seedFiles()).toEqual([path.basename(file)]);
   });
 
   it('keeps the key share and says where it is when the server may have created the wallet', async () => {
@@ -153,7 +155,7 @@ describe('botwallet_register', () => {
     });
 
     const result = await register.handler({ name: 'Research Bot' }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBe(true);
     expect(out.code).toBe('REGISTRATION_UNCONFIRMED');
@@ -174,8 +176,8 @@ describe('botwallet_register', () => {
     const result = await register.handler({ name: 'Research Bot' }, makeCtx(sdk));
 
     expect(result.isError).toBe(true);
-    expect(parse(result).code).toBe('KEY_SAVE_FAILED');
-    expect(parse(result).message).toContain('No wallet was created');
+    expect(parseResult(result).code).toBe('KEY_SAVE_FAILED');
+    expect(parseResult(result).message).toContain('No wallet was created');
     expect(sdk.dkgComplete).not.toHaveBeenCalled();
   });
 
@@ -184,7 +186,7 @@ describe('botwallet_register', () => {
     const ctx = makeCtx(mockSdk(completeResult));
 
     const result = await register.handler({ name: 'Research Bot' }, ctx);
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBeUndefined();
     expect(out).toMatchObject({ registered: true, api_key: API_KEY, claim_code: 'ABC123' });
@@ -198,10 +200,24 @@ describe('botwallet_register', () => {
   it('never overwrites a stray seed file that has the same name', async () => {
     saveSeed('research-bot', OTHER_MNEMONIC);
 
-    const out = parse(await register.handler({ name: 'Research Bot' }, makeCtx(mockSdk(completeResult))));
+    const out = parseResult(await register.handler({ name: 'Research Bot' }, makeCtx(mockSdk(completeResult))));
 
     expect(out.wallet_name).toBe('research-bot-2');
     expect(loadSeed('research-bot')).toBe(OTHER_MNEMONIC);
     expect(getWallet('research-bot-2')!.seed_file).toBe('seeds/research-bot-2.seed');
+  });
+});
+
+// The CLI's TestDKGCompleteRefused cases (packages/cli-go/cmd/wallet_create_test.go)
+describe('dkgCompleteRefused', () => {
+  it.each([
+    ['expired session', new BotWalletError('SESSION_EXPIRED', 'DKG session expired'), true],
+    ['group key mismatch', new BotWalletError('DKG_VERIFICATION_FAILED', 'Group key mismatch'), true],
+    ['bad input', new BotWalletError('VALIDATION_ERROR', 'agent_public_share must be 32 bytes'), true],
+    ['key already registered', new BotWalletError('VALIDATION_ERROR', 'This group key is already registered'), false],
+    ['server error', new BotWalletError('INTERNAL_ERROR', 'Failed to create wallet'), false],
+    ['network error', new NetworkError('request failed: timeout'), false],
+  ])('%s', (_name, error, refused) => {
+    expect(dkgCompleteRefused(error)).toBe(refused);
   });
 });

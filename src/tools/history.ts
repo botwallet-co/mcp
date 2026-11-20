@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../types.js';
 import { READ_ONLY, UPDATES } from '../utils/annotations.js';
-import { formatResult } from '../utils/format.js';
-import { formatToolError } from '../utils/errors.js';
+import { formatResult } from '../utils/tool-result.js';
 import { PaginationSchema } from '../utils/schemas.js';
+import { apiTool, defineTool } from './define.js';
 
-const transactions: ToolDefinition = {
+const transactions = apiTool({
   name: 'botwallet_transactions',
   annotations: READ_ONLY,
   description:
@@ -16,19 +16,10 @@ const transactions: ToolDefinition = {
     type: z.enum(['all', 'in', 'out']).optional()
       .describe('Transaction direction filter (default: all)'),
   }),
-  async handler(args, ctx) {
-    try {
-      const result = await ctx.sdk.transactions(args as {
-        type?: 'all' | 'in' | 'out'; limit?: number; offset?: number;
-      });
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  call: (sdk, args) => sdk.transactions(args),
+});
 
-const myLimits: ToolDefinition = {
+const myLimits = apiTool({
   name: 'botwallet_my_limits',
   annotations: READ_ONLY,
   description:
@@ -36,34 +27,20 @@ const myLimits: ToolDefinition = {
     'recipient restrictions (whitelists/blacklists), earning limits, and withdrawal rules. ' +
     'Check this before attempting operations that might be restricted by the owner\'s guard rails.',
   inputSchema: z.object({}),
-  async handler(_args, ctx) {
-    try {
-      const result = await ctx.sdk.myLimits();
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  call: sdk => sdk.myLimits(),
+});
 
-const pendingApprovals: ToolDefinition = {
+const pendingApprovals = apiTool({
   name: 'botwallet_pending_approvals',
   annotations: READ_ONLY,
   description:
     'List actions waiting for owner approval (payments and withdrawals). ' +
     'Shows approval URLs so the owner can act on them.',
   inputSchema: z.object({}),
-  async handler(_args, ctx) {
-    try {
-      const result = await ctx.sdk.pendingApprovals();
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  call: sdk => sdk.pendingApprovals(),
+});
 
-const approvalStatus: ToolDefinition = {
+const approvalStatus = defineTool({
   name: 'botwallet_approval_status',
   annotations: READ_ONLY,
   description:
@@ -72,41 +49,37 @@ const approvalStatus: ToolDefinition = {
   inputSchema: z.object({
     approval_id: z.string().describe('Approval ID to check'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { approval_id } = args as { approval_id: string };
-      const result = await ctx.sdk.approvalStatus({ approval_id });
-      const data = result as Record<string, unknown>;
+  async run(args, ctx) {
+    const { approval_id } = args;
+    const result = await ctx.sdk.approvalStatus({ approval_id });
 
-      // Enrich with MCP tool references (the API returns CLI commands only)
-      if (data.actionable && data.transaction_id) {
-        const txId = data.transaction_id as string;
-        const type = data.type as string;
+    // Enrich with MCP tool references (the API returns CLI commands only)
+    if (result.actionable && result.transaction_id) {
+      const txId = result.transaction_id;
 
-        if (type === 'withdrawal') {
-          data.confirm_tool = 'botwallet_confirm_withdrawal';
-          data.confirm_args = { transaction_id: txId };
-        } else if (type === 'x402_payment') {
-          data.confirm_tool = 'botwallet_x402_pay_and_fetch';
-          data.confirm_args = { fetch_id: txId };
-        } else {
-          data.confirm_tool = 'botwallet_confirm_payment';
-          data.confirm_args = { transaction_id: txId };
-        }
+      if (result.type === 'withdrawal') {
+        result.confirm_tool = 'botwallet_confirm_withdrawal';
+        result.confirm_args = { transaction_id: txId };
+      } else if (result.type === 'x402_payment') {
+        result.confirm_tool = 'botwallet_x402_pay_and_fetch';
+        result.confirm_args = { fetch_id: txId };
+      } else {
+        result.confirm_tool = 'botwallet_confirm_payment';
+        result.confirm_args = { transaction_id: txId };
       }
-
-      return formatResult(data);
-    } catch (e) {
-      return formatToolError(e);
     }
-  },
-};
 
-// Event types the server filters on (VALID_EVENT_TYPES in
-// supabase/functions/bot/handlers/events.ts). The server ignores any other
-// type, and a filter left with no known type returns every event, so only
-// these are accepted. 'guardrails_updated' is left out: the server accepts it
-// but never records such an event, so filtering on it always comes back empty.
+    return formatResult(result);
+  },
+});
+
+// The event types this tool offers, from VALID_EVENT_TYPES in
+// supabase/functions/bot/handlers/events.ts. The server answers
+// VALIDATION_ERROR for a type it doesn't know, so the schema lets only these
+// through. guardrails_updated is left out because nothing records it;
+// wallet_claimed isn't recorded either, but stays so calls that pass it keep
+// working. The server also records approval_expiring, paylink_created,
+// wallet_abandoned and keys_exported, which are not offered here yet.
 const EVENT_TYPES = [
   'approval_required',
   'approval_resolved',
@@ -124,7 +97,7 @@ const EVENT_TYPES = [
   'withdrawal_completed',
 ] as const;
 
-const events: ToolDefinition = {
+const events = defineTool({
   name: 'botwallet_events',
   // Not read-only: mark_read marks the returned events as read
   annotations: UPDATES,
@@ -147,34 +120,27 @@ const events: ToolDefinition = {
     mark_read: z.boolean().optional()
       .describe('Mark the events this call returns as read (only those, not other unread events)'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { mark_read, ...eventParams } = args as {
-        types?: string[]; limit?: number; unread_only?: boolean;
-        since?: string; mark_read?: boolean;
-      };
+  async run(args, ctx) {
+    const { mark_read, ...eventParams } = args;
 
-      const result = await ctx.sdk.events(eventParams);
+    const result = await ctx.sdk.events(eventParams);
 
-      // Mark as read if requested
-      let markedCount = 0;
-      if (mark_read && result.events.length > 0) {
-        const eventIds = result.events.map(e => e.id).filter(Boolean);
-        if (eventIds.length > 0) {
-          const markResult = await ctx.sdk.markRead({ event_ids: eventIds });
-          markedCount = markResult.marked_read ?? eventIds.length;
-        }
+    // Mark as read if requested
+    let markedCount = 0;
+    if (mark_read && result.events.length > 0) {
+      const eventIds = result.events.map(e => e.id).filter(Boolean);
+      if (eventIds.length > 0) {
+        const markResult = await ctx.sdk.markRead({ event_ids: eventIds });
+        markedCount = markResult.marked_read ?? eventIds.length;
       }
-
-      return formatResult({
-        ...result,
-        marked_as_read: markedCount,
-      } as unknown as Record<string, unknown>);
-    } catch (e) {
-      return formatToolError(e);
     }
+
+    return formatResult({
+      ...result,
+      marked_as_read: markedCount,
+    });
   },
-};
+});
 
 export const historyTools: ToolDefinition[] = [
   transactions,

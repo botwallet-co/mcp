@@ -1,13 +1,12 @@
 // The MCP server over an in-memory transport. Offline: fetch is stubbed and
-// no API key from the environment is used (tests/e2e covers the live API).
+// the client has no API key (tests/e2e covers the live API).
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { BotWallet } from '../../src/sdk/index.js';
-import { createServer } from '../../src/server.js';
-import type { ConfigContext } from '../../src/types.js';
+import { ALL_TOOLS } from '../../src/tools/index.js';
 import { MCP_VERSION } from '../../src/utils/version.js';
+import { connectClient, resultText } from '../helpers/harness.js';
 import { readFileSync } from 'node:fs';
 
 describe('MCP server integration', () => {
@@ -18,38 +17,13 @@ describe('MCP server integration', () => {
   }));
 
   beforeAll(async () => {
-    // A key set on the developer's machine would otherwise be picked up
-    vi.stubEnv('BOTWALLET_API_KEY', '');
-    vi.stubEnv('BW_API_KEY', '');
     vi.stubGlobal('fetch', fetchMock);
 
     // No API key: only ping works without auth
-    const sdk = new BotWallet({ baseUrl: 'https://api.example.test/v1' });
-
-    const config: ConfigContext = {
-      walletName: undefined,
-      hasConfig: false,
-      hasSeed: false,
-    };
-
-    const server = createServer(sdk, config);
-
-    // In-memory transport for testing
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-
-    client = new Client({
-      name: 'test-client',
-      version: '0.1.0',
-    });
-
-    await Promise.all([
-      server.connect(serverTransport),
-      client.connect(clientTransport),
-    ]);
+    client = await connectClient(new BotWallet({ baseUrl: 'https://api.example.test/v1' }));
   });
 
   afterAll(() => {
-    vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
 
@@ -60,9 +34,9 @@ describe('MCP server integration', () => {
     expect(MCP_VERSION).toBe(pkg.version);
   });
 
-  it('lists all 36 tools', async () => {
+  it('lists every tool', async () => {
     const result = await client.listTools();
-    expect(result.tools.length).toBe(36);
+    expect(result.tools.length).toBe(ALL_TOOLS.length);
 
     // Verify each tool has a name, description, and input schema
     for (const tool of result.tools) {
@@ -182,8 +156,7 @@ describe('MCP server integration', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(JSON.parse(text)).toMatchObject({ ok: true, version: 'test' });
+    expect(JSON.parse(resultText(result))).toMatchObject({ ok: true, version: 'test' });
     expect(fetchMock).toHaveBeenCalledWith('https://api.example.test/v1/bot', expect.anything());
   });
 
@@ -194,8 +167,7 @@ describe('MCP server integration', () => {
     });
 
     expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(text).toContain('no local config found');
+    expect(resultText(result)).toContain('no local config found');
   });
 
   it('botwallet_wallet_backup returns no-seed error when unconfigured', async () => {
@@ -205,8 +177,7 @@ describe('MCP server integration', () => {
     });
 
     expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(text).toContain('no local key share');
+    expect(resultText(result)).toContain('no local key share');
   });
 
   it('validates input schemas', async () => {
@@ -216,8 +187,7 @@ describe('MCP server integration', () => {
     });
 
     expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(text).toContain('validation error');
+    expect(resultText(result)).toContain('validation error');
   });
 
   it('botwallet_info returns auth error without API key', async () => {
@@ -227,8 +197,7 @@ describe('MCP server integration', () => {
     });
 
     expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(text).toContain('API key');
+    expect(resultText(result)).toContain('API key');
   });
 
   it('reads wallet status resource', async () => {
@@ -237,8 +206,8 @@ describe('MCP server integration', () => {
     });
 
     expect(result.contents).toHaveLength(1);
-    const text = result.contents[0].text as string;
+    const [content] = result.contents;
     // Without API key, should show unavailable message
-    expect(text).toContain('unavailable');
+    expect('text' in content ? content.text : '').toContain('unavailable');
   });
 });

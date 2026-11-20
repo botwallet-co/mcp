@@ -8,6 +8,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { SOLANA_ADDRESS_PATTERN } from '../solana/message.js';
 import { seedsDir } from './config.js';
 
 function ensureSeedsDir(): void {
@@ -87,7 +88,7 @@ export function removeNewSeed(filePath: string): void {
  * left behind by an unfinished registration still says which wallet it opens.
  */
 export function savePendingSeed(address: string, mnemonic: string): string {
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) {
+  if (!SOLANA_ADDRESS_PATTERN.test(address)) {
     throw new Error(`Invalid wallet address: ${JSON.stringify(address)}`);
   }
   const filePath = path.join(seedsDir(), `.pending-${address}.seed`);

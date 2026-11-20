@@ -1,10 +1,11 @@
-import { BotWalletError, type BotWallet } from '../sdk/index.js';
+import { BotWalletError, type BotWallet, type InfoResponse } from '../sdk/index.js';
 import type { ConfigContext } from '../types.js';
 import { seedExists } from '../config/index.js';
-import { formatUsd } from '../utils/format.js';
+import { errorMessage } from '../utils/errors.js';
 
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+/** A dollar amount for display, e.g. $12.50. */
+function formatUsd(amount: number): string {
+  return `$${amount.toFixed(2)}`;
 }
 
 function text(value: unknown): string | undefined {
@@ -16,7 +17,7 @@ function text(value: unknown): string | undefined {
  * The server answers most calls with WALLET_NOT_CLAIMED or WALLET_ABANDONED
  * until a human owner claims the wallet, so the claim link is the useful part.
  */
-function claimLines(info: Record<string, unknown>): string[] {
+function claimLines(info: InfoResponse): string[] {
   const lines: string[] = [];
   const claimUrl = text(info.claim_url);
   const claimCode = text(info.claim_code);
@@ -65,11 +66,9 @@ export async function getWalletStatus(
       : unavailable;
   }
 
-  const info = infoResult.value as unknown as Record<string, unknown>;
-  const bal = balanceResult.status === 'fulfilled'
-    ? balanceResult.value as unknown as Record<string, unknown>
-    : undefined;
-  // is_claimed is true for an abandoned wallet, so go by the status
+  const info = infoResult.value;
+  const bal = balanceResult.status === 'fulfilled' ? balanceResult.value : undefined;
+  // is_claimed is false for an unclaimed and an abandoned wallet alike, so go by the status
   const needsOwner = info.status === 'unclaimed' || info.status === 'abandoned';
   const owner = info.status === 'abandoned' ? 'none (abandoned)' : needsOwner ? 'unclaimed' : 'claimed';
 
@@ -79,11 +78,11 @@ export async function getWalletStatus(
   ];
 
   if (bal) {
-    const balance = bal.balance as number ?? 0;
-    const budget = bal.budget as number | undefined;
-    const spentThisPeriod = bal.spent_this_period as number | undefined;
-    const remainingBudget = bal.remaining_budget as number | undefined;
-    const budgetPeriod = bal.budget_period as string | undefined;
+    const balance = bal.balance ?? 0;
+    const budget = bal.budget;
+    const spentThisPeriod = bal.spent_this_period;
+    const remainingBudget = bal.remaining_budget;
+    const budgetPeriod = bal.budget_period;
 
     lines.push(`Balance: ${formatUsd(balance)} USDC`);
     if (budget != null) {

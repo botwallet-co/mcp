@@ -54,7 +54,7 @@ Every wallet uses FROST 2-of-2 threshold signatures. During wallet creation, a k
 - **Key 1** — the agent's share, stored locally at `~/.botwallet/seeds/`
 - **Key 2** — the server's share, held by Botwallet
 
-The full private key never exists. Every transaction requires both parties to co-sign. Neither the agent nor Botwallet can move funds alone. Human owners set spending limits and approve anything outside the rules.
+During normal signing the full private key is never assembled; only the recovery tool combines both shares, inside the owner's browser, when the owner recovers a wallet. Every transaction requires both parties to co-sign. Neither the agent nor Botwallet can move funds alone. Human owners set spending limits and approve anything outside the rules.
 
 Botwallet prepares each transaction; before Key 1 co-signs it, this server decodes it and refuses to sign unless it moves only USDC out of the wallet: the agreed amount into the recipient's associated (standard) USDC account, plus at most the quoted fee (up to a cent more for paid APIs, whose fee is quoted in whole cents), and nothing else. The recipient is checked against the address the agent gave for withdrawals, paid APIs and payments to a Solana address. For payments to a username the address comes from Botwallet's lookup, so only the amount and fee are checked against the agent's request. The [Agent CLI](https://github.com/botwallet-co/agent-cli) and the signing page apply the same rules.
 
@@ -166,7 +166,7 @@ If you install globally, use `botwallet-mcp` as the command instead of `npx -y @
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `BOTWALLET_API_KEY` | — | API key (`BW_API_KEY` also works, as in the CLI). When set, it decides the wallet. On its own it is enough for read-only use; payments, withdrawals and paid API calls also need that wallet's key share (Key 1) in `~/.botwallet/seeds/<wallet>.seed`. Signing uses the wallet in `config.json` that has this key; if it isn't in `config.json`, set `BOTWALLET_WALLET` to the seed file's name |
-| `BOTWALLET_WALLET` | — | Which wallet to use (if you have several). The server won't start if no wallet has this name. MCP only: the CLI uses `--wallet` |
+| `BOTWALLET_WALLET` | — | Which wallet to use (if you have several). Without `BOTWALLET_API_KEY`, the server won't start if no wallet in `config.json` has this name. With it, the key decides; this then only picks the key share for a key that `config.json` doesn't list. MCP only: the CLI uses `--wallet` |
 | `BOTWALLET_API_URL` | `https://api.botwallet.co/v1` | API endpoint, the same variable the CLI reads. `BOTWALLET_BASE_URL`, used by older versions, still works. When neither is set, `base_url` in `~/.botwallet/config.json` is used, as in the CLI |
 
 All optional. The server reads `~/.botwallet/config.json` (shared with the [CLI](https://github.com/botwallet-co/agent-cli)) and figures out the rest. Without these variables it uses the default wallet; registering or importing a wallet makes it the default.
@@ -268,11 +268,11 @@ All optional. The server reads `~/.botwallet/config.json` (shared with the [CLI]
                                                         └───────────┘
 ```
 
-The server runs locally on the agent's machine. Key shares are stored in `~/.botwallet/seeds/` and are never sent to Botwallet. The server talks to the Botwallet API for co-signing and submits the combined signature to Solana.
+The server runs locally on the agent's machine. Key shares are stored in `~/.botwallet/seeds/` and are never sent to Botwallet. For each transfer it sends Key 1's partial signature to the Botwallet API, which combines it with Key 2's and submits the transaction to Solana. For a paid API call the API returns the signed transaction instead, and this server sends it to the paid API.
 
 ## Security
 
-The agent can't bypass spending limits. Those are enforced server-side. Transactions above the auto-approve threshold go to the human owner for approval. There is no full private key anywhere in the system.
+The agent can't bypass spending limits. Those are enforced server-side. Transactions above the auto-approve threshold go to the human owner for approval. No one holds the full private key: it is assembled only by the recovery tool, in the owner's browser, when the owner recovers a wallet.
 
 Every tool carries MCP tool annotations. Balance, history and lookups are marked read-only, so clients that support annotations can run them without asking. Tools that move money (`botwallet_pay`, `botwallet_withdraw`, the confirm tools, `botwallet_x402_pay_and_fetch`), touch Key 1 (`botwallet_wallet_backup`, `botwallet_wallet_export`, `botwallet_wallet_import`) or change the owner are marked destructive, so clients can keep asking before those. Allowing the read-only tools is safer than "always allow" for the whole server.
 
@@ -301,7 +301,8 @@ cd mcp
 npm install
 npm run build
 npm test                # unit + integration tests, offline
-npm run test:e2e        # E2E tests against the live API (no payments)
+npm run test:e2e        # E2E tests against the live API (no payments; set BOTWALLET_E2E_API_KEY for the authenticated part)
+npm run typecheck       # type-check src and tests
 npm run inspect         # Open in MCP Inspector
 ```
 

@@ -6,7 +6,7 @@ import { fundingTools } from './funding.js';
 import { withdrawalTools } from './withdrawals.js';
 import { x402Tools } from './x402.js';
 import { historyTools } from './history.js';
-import { transferTools } from './transfer.js';
+import { walletFileTools } from './wallet-files.js';
 
 export const ALL_TOOLS: ToolDefinition[] = [
   ...walletTools,
@@ -16,9 +16,5 @@ export const ALL_TOOLS: ToolDefinition[] = [
   ...withdrawalTools,
   ...x402Tools,
   ...historyTools,
-  ...transferTools,
+  ...walletFileTools,
 ];
-
-export const TOOL_HANDLERS = new Map<string, ToolDefinition>(
-  ALL_TOOLS.map(tool => [tool.name, tool]),
-);

@@ -3,10 +3,14 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
-  BotWallet, BotWalletError, GuardRailError, RecipientNotFoundError, UnauthorizedError,
+  BotWallet, BotWalletError, GuardRailError, isNoAnswer, NetworkError, RecipientNotFoundError, TimeoutError,
+  UnauthorizedError,
 } from '../../../src/sdk/index.js';
-import { formatToolError } from '../../../src/utils/errors.js';
+import { formatToolError } from '../../../src/utils/tool-result.js';
 import { MCP_VERSION } from '../../../src/utils/version.js';
+
+const API_KEY = 'bw_bot_fixture-not-a-real-key';
+const BASE_URL = 'https://api.example.test/v1';
 
 function stubApiError(error: Record<string, unknown>, status = 400) {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(
@@ -17,7 +21,6 @@ function stubApiError(error: Record<string, unknown>, status = 400) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  vi.unstubAllEnvs();
 });
 
 describe('requests', () => {
@@ -34,10 +37,73 @@ describe('requests', () => {
   });
 });
 
+describe('timeouts', () => {
+  /** A fetch whose reply stops after `head` until the request's signal aborts it. */
+  function stallingFetch(head?: string) {
+    return vi.fn(async (_url: string, init?: RequestInit) => {
+      const signal = init!.signal!;
+      if (head === undefined) {
+        // No reply at all
+        return new Promise<Response>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+      }
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(head));
+          signal.addEventListener('abort', () => controller.error(signal.reason));
+        },
+      }), { status: 200 });
+    });
+  }
+
+  it('end a request that gets no reply as TIMEOUT', async () => {
+    vi.stubGlobal('fetch', stallingFetch());
+    const error = await new BotWallet({ apiKey: API_KEY, baseUrl: BASE_URL, timeout: 50 }).info().catch(e => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+  });
+
+  it('cover reading the reply too, as in the CLI', async () => {
+    vi.stubGlobal('fetch', stallingFetch('{"success": true, "data": {'));
+    const error = await new BotWallet({ apiKey: API_KEY, baseUrl: BASE_URL, timeout: 50 }).info().catch(e => e);
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error.code).toBe('TIMEOUT');
+    expect(isNoAnswer(error)).toBe(true);
+  });
+});
+
+describe('replies without the API envelope', () => {
+  // Every bot action answers { success, data } or { success: false, error }.
+  // Anything else came from a gateway or proxy, so it isn't known whether the
+  // action ran, and the money tools treat it like no answer.
+  it.each([
+    [502, { msg: 'Bad gateway' }],
+    [546, { code: 'WORKER_LIMIT', message: 'Function failed due to not having enough compute resources' }],
+    [200, { ok: true }],
+    [200, null],
+  ])('HTTP %s with %j is a NETWORK_ERROR, not an error without a code', async (status, body) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })));
+    const sdk = new BotWallet({ apiKey: API_KEY, baseUrl: BASE_URL });
+
+    const error = await sdk.pay({ to: 'shop', amount: 5 }, 'key-1').catch(e => e);
+
+    expect(error).toBeInstanceOf(NetworkError);
+    expect(error.code).toBe('NETWORK_ERROR');
+    expect(error.message).toBe(`Unexpected API response (HTTP ${status})`);
+    expect(isNoAnswer(error)).toBe(true);
+  });
+
+  it('still unwraps a successful answer and keeps an API error\'s code', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ success: true, data: { ok: true } })));
+    expect(await new BotWallet({ baseUrl: BASE_URL }).ping()).toEqual({ ok: true });
+
+    stubApiError({ code: 'VALIDATION_ERROR', message: 'amount is required' });
+    const error = await new BotWallet({ apiKey: API_KEY, baseUrl: BASE_URL }).pay({ to: 'shop' }).catch(e => e);
+    expect(error.code).toBe('VALIDATION_ERROR');
+    expect(isNoAnswer(error)).toBe(false);
+  });
+});
+
 describe('missing or rejected API key', () => {
   it('without a key, points to the existing wallets before registering, in tool names', async () => {
-    vi.stubEnv('BOTWALLET_API_KEY', '');
-    vi.stubEnv('BW_API_KEY', '');
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const sdk = new BotWallet({ baseUrl: 'https://api.example.test/v1' });
@@ -177,7 +243,7 @@ describe('guard-rail blocks', () => {
   it('keep the server\'s how_to_fix and details', async () => {
     stubApiError(maxWithdrawal);
 
-    const error = await sdk().withdraw({ amount: 500, to_address: 'So11111111111111111111111111111111111111112' })
+    const error = await sdk().withdraw({ amount: 500, to_address: 'So11111111111111111111111111111111111111112', reason: 'test' })
       .catch(e => e);
 
     expect(error).toBeInstanceOf(GuardRailError);
@@ -192,9 +258,9 @@ describe('guard-rail blocks', () => {
   });
 
   it.each(['WALLET_SUSPENDED', 'ALLOW_WITHDRAWAL_REQUESTS', 'ALLOW_PAYLINKS', 'MAX_PAYLINK_AMOUNT'])(
-    'recognise the current code %s',
+    'recognise %s by the guard_rail object the server sends with it',
     async (code) => {
-      stubApiError({ code, message: 'Blocked', how_to_fix: 'Ask your wallet owner.' });
+      stubApiError({ code, message: 'Blocked', how_to_fix: 'Ask your wallet owner.', guard_rail: { key: code.toLowerCase() } });
       const error = await sdk().createPaymentRequest({ amount: 5, description: 'Test' }).catch(e => e);
       expect(error).toBeInstanceOf(GuardRailError);
       expect(error.howToFix).toBe('Ask your wallet owner.');
@@ -203,7 +269,7 @@ describe('guard-rail blocks', () => {
 
   it('recognise a rule this version does not know, by its guard_rail object', async () => {
     stubApiError({ ...maxWithdrawal, code: 'MAX_SOMETHING_NEW', guard_rail: { key: 'max_something_new' } });
-    const error = await sdk().withdraw({ amount: 5, to_address: 'So11111111111111111111111111111111111111112' })
+    const error = await sdk().withdraw({ amount: 5, to_address: 'So11111111111111111111111111111111111111112', reason: 'test' })
       .catch(e => e);
     expect(error).toBeInstanceOf(GuardRailError);
     expect(error.code).toBe('MAX_SOMETHING_NEW');
@@ -212,7 +278,7 @@ describe('guard-rail blocks', () => {
 
   it('leave other errors as they are', async () => {
     stubApiError({ code: 'VALIDATION_ERROR', message: 'amount must be greater than 0', how_to_fix: 'Send a positive amount.' });
-    const error = await sdk().withdraw({ amount: 0, to_address: 'So11111111111111111111111111111111111111112' })
+    const error = await sdk().withdraw({ amount: 0, to_address: 'So11111111111111111111111111111111111111112', reason: 'test' })
       .catch(e => e);
     expect(error).toBeInstanceOf(BotWalletError);
     expect(error).not.toBeInstanceOf(GuardRailError);

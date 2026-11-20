@@ -1,19 +1,21 @@
 // What Key 1 may sign for one transaction: the agent's own figures from the
-// tool that started the transfer (utils/agreed-transfers.ts), with the
-// server's confirm response filling in what the agent didn't say.
+// tool that started the transfer (agreed-transfers.ts), with the server's
+// confirm response filling in what the agent didn't say.
 
-import { getWallet } from '../config/index.js';
+import { configExists, getWallet } from '../config/index.js';
 import { TransactionCheckError, usdToBaseUnits, type ExpectedTransfer, type TransferKind } from '../solana/index.js';
 import type { AgreedTransfer } from './agreed-transfers.js';
 
-/** The wallet address Key 1 belongs to, from config.json, when it is recorded there. */
+/**
+ * The wallet address Key 1 belongs to, from config.json, when it is recorded
+ * there. Without config.json (env-only setups) or for an entry stored without
+ * one (older imports) the message is checked against the group key instead.
+ * Throws when config.json is there but can't be read, as the CLI refuses to
+ * use Key 1 then: signing must not lose the check that config.json allows.
+ */
 export function localWalletAddress(walletName: string): string | undefined {
-  try {
-    return getWallet(walletName)?.public_key || undefined;
-  } catch {
-    // No readable config.json (env-only setup): the message is checked against the group key
-    return undefined;
-  }
+  if (!configExists()) return undefined;
+  return getWallet(walletName)?.public_key || undefined;
 }
 
 /**
@@ -45,8 +47,9 @@ export function expectedTransfer(
     kind,
     network,
     amount,
-    // x402 amounts are reported in cents, rounded up from the exact base units
-    amountRoundedUpToCent: agreed ? !!agreed.amountRoundedUpToCent : kind === 'x402',
+    // The server reports x402 prices in cents, rounded up from the API's exact
+    // price in base units; the agent's own record holds the exact price
+    amountRoundedUpToCent: !agreed && kind === 'x402',
     recipient,
     quotedFee: quotedFees.length > 0 ? quotedFees.reduce((a, b) => (a < b ? a : b)) : undefined,
   };

@@ -2,12 +2,9 @@
 // recipient handling of botwallet_pay. The SDK is mocked.
 
 import { describe, it, expect, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { spendingTools } from '../../../src/tools/spending.js';
-import { createServer } from '../../../src/server.js';
-import type { BotWallet } from '../../../src/sdk/index.js';
-import type { ToolContext, ToolResult } from '../../../src/types.js';
+import { connectClient, localWallet, parseResult, toolContext } from '../../helpers/harness.js';
+import { ata, testAddress } from '../../helpers/solana-messages.js';
 
 const tool = (name: string) => spendingTools.find(t => t.name === name)!;
 const lookup = tool('botwallet_lookup');
@@ -27,22 +24,13 @@ function fakeSdk() {
   };
 }
 
-function makeCtx(sdk: ReturnType<typeof fakeSdk>): ToolContext {
-  return {
-    sdk: sdk as unknown as BotWallet,
-    config: { walletName: 'agent', hasConfig: true, hasSeed: true },
-  };
-}
-
-function parse(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text);
-}
+const makeCtx = (sdk: ReturnType<typeof fakeSdk>) => toolContext(sdk, localWallet('agent'));
 
 describe('botwallet_can_i_afford', () => {
   async function check(server: Record<string, unknown>, to = 'acme-bot') {
     const sdk = fakeSdk();
     sdk.canIAfford.mockResolvedValue(server);
-    return parse(await canIAfford.handler({ to, amount: 5 }, makeCtx(sdk)));
+    return parseResult(await canIAfford.handler({ to, amount: 5 }, makeCtx(sdk)));
   }
 
   it('can pay: affordable and auto-approved', async () => {
@@ -100,7 +88,7 @@ describe('botwallet_can_i_afford', () => {
 describe('usernames with a leading @', () => {
   it('botwallet_lookup sends the username without the @', async () => {
     const sdk = fakeSdk();
-    const out = parse(await lookup.handler({ username: '@clever-byte-1234' }, makeCtx(sdk)));
+    const out = parseResult(await lookup.handler({ username: '@clever-byte-1234' }, makeCtx(sdk)));
     expect(sdk.lookup).toHaveBeenCalledWith({ username: 'clever-byte-1234' });
     expect(out.found).toBe(true);
   });
@@ -113,7 +101,7 @@ describe('usernames with a leading @', () => {
 
   it('botwallet_pay sends the recipient without the @', async () => {
     const sdk = fakeSdk();
-    const out = parse(await pay.handler({ to: '@acme-bot', amount: 5 }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: '@acme-bot', amount: 5 }, makeCtx(sdk)));
     expect(sdk.pay.mock.calls[0][0]).toMatchObject({ to: 'acme-bot', amount: 5 });
     expect(out.needs_approval).toBe(true);
   });
@@ -129,16 +117,13 @@ describe('usernames with a leading @', () => {
     const sdk = fakeSdk();
     const result = await pay.handler({ to: '@', amount: 5 }, makeCtx(sdk));
     expect(result.isError).toBe(true);
-    expect(parse(result).code).toBe('VALIDATION_ERROR');
+    expect(parseResult(result).code).toBe('VALIDATION_ERROR');
     expect(sdk.pay).not.toHaveBeenCalled();
   });
 
   it('accepts @username through the MCP server and passes it on without the @', async () => {
     const sdk = fakeSdk();
-    const server = createServer(sdk as unknown as BotWallet, { walletName: 'agent', hasConfig: true, hasSeed: true });
-    const client = new Client({ name: 'test-client', version: '0.1.0' });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const client = await connectClient(sdk, localWallet('agent'));
 
     const listed = await client.listTools();
     const schema = listed.tools.find(t => t.name === 'botwallet_lookup')!.inputSchema as {
@@ -150,5 +135,49 @@ describe('usernames with a leading @', () => {
     expect(result.isError).toBeFalsy();
     expect(sdk.lookup).toHaveBeenCalledWith({ username: 'clever-byte-1234' });
     await client.close();
+  });
+});
+
+describe('Solana address recipients', () => {
+  // Base58 and the length of an address, but 33 bytes (the CLI's test value, cmd/address_test.go)
+  const NOT_AN_ADDRESS = 'z'.repeat(44);
+
+  it('botwallet_pay refuses an address that does not decode to 32 bytes, without calling Botwallet', async () => {
+    const sdk = fakeSdk();
+    const result = await pay.handler({ to: NOT_AN_ADDRESS, amount: 5 }, makeCtx(sdk));
+
+    expect(result.isError).toBe(true);
+    expect(parseResult(result)).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Invalid Solana address format' });
+    expect(parseResult(result).how_to_fix).toContain('decode to 32 bytes');
+    expect(sdk.pay).not.toHaveBeenCalled();
+  });
+
+  it('botwallet_pay still pays an address off the curve, as the CLI does', async () => {
+    const sdk = fakeSdk();
+    const offCurve = ata(testAddress('merchant'));
+    await pay.handler({ to: offCurve, amount: 5 }, makeCtx(sdk));
+    expect(sdk.pay.mock.calls[0][0]).toMatchObject({ to: offCurve });
+  });
+});
+
+describe('botwallet_list_payments', () => {
+  const listPayments = tool('botwallet_list_payments');
+
+  async function list(args: Record<string, unknown>) {
+    const sdk = { listPayments: vi.fn(async (_p: Record<string, unknown>) => ({ payments: [], total: 0 })) };
+    const result = await listPayments.handler(args, toolContext(sdk, localWallet('agent')));
+    return { result, sent: sdk.listPayments.mock.calls[0]?.[0] };
+  }
+
+  it('asks for expired payments when the agent asks for cancelled ones: cancelling marks a payment expired', async () => {
+    const { result, sent } = await list({ status: 'cancelled', limit: 5 });
+    expect(result.isError).toBeFalsy();
+    expect(sent).toEqual({ status: 'expired', limit: 5 });
+  });
+
+  it('passes every other filter on as it is', async () => {
+    for (const args of [{}, { status: 'expired' }, { status: 'all', offset: 10 }, { transaction_id: 'tx-1' }]) {
+      expect((await list(args)).sent).toEqual(args);
+    }
   });
 });

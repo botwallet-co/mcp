@@ -3,19 +3,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { x402Tools } from '../../../src/tools/x402.js';
 import { USER_AGENT } from '../../../src/utils/user-agent.js';
-import type { BotWallet } from '../../../src/sdk/index.js';
-import type { ToolContext, ToolResult } from '../../../src/types.js';
+import { parseResult, toolContext } from '../../helpers/harness.js';
 
 const discover = x402Tools.find((t) => t.name === 'botwallet_x402_discover')!;
 
-const ctx: ToolContext = {
-  sdk: { getBaseUrl: () => 'https://api.example.test/v1' } as unknown as BotWallet,
-  config: { walletName: undefined, hasConfig: false, hasSeed: false },
-};
-
-function parse(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text);
-}
+const ctx = toolContext({ getBaseUrl: () => 'https://api.example.test/v1' });
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -29,7 +21,7 @@ describe('botwallet_x402_discover', () => {
     })));
     vi.stubGlobal('fetch', fetchMock);
 
-    const out = parse(await discover.handler({ query: 'weather' }, ctx));
+    const out = parseResult(await discover.handler({ query: 'weather' }, ctx));
 
     expect(out.count).toBe(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
@@ -44,7 +36,7 @@ describe('botwallet_x402_discover', () => {
     }));
 
     const result = await discover.handler({}, ctx);
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBe(true);
     expect(out.code).toBe('TIMEOUT');
@@ -59,7 +51,7 @@ describe('botwallet_x402_discover', () => {
     });
     vi.stubGlobal('fetch', vi.fn(async () => new Response(stalled, { status: 200 })));
 
-    const out = parse(await discover.handler({}, ctx));
+    const out = parseResult(await discover.handler({}, ctx));
 
     expect(out.code).toBe('TIMEOUT');
   });
@@ -68,7 +60,7 @@ describe('botwallet_x402_discover', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ message: 'upstream down' }), { status: 503 })));
 
     const result = await discover.handler({}, ctx);
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBe(true);
     expect(out.code).toBe('NETWORK_ERROR');
@@ -81,7 +73,7 @@ describe('botwallet_x402_discover', () => {
       error: { message: 'query too long' },
     }), { status: 400 })));
 
-    const out = parse(await discover.handler({ query: 'x'.repeat(500) }, ctx));
+    const out = parseResult(await discover.handler({ query: 'x'.repeat(500) }, ctx));
 
     expect(out.message).toBe('query too long');
   });
@@ -91,7 +83,7 @@ describe('botwallet_x402_discover', () => {
       throw new TypeError('fetch failed');
     }));
 
-    const out = parse(await discover.handler({}, ctx));
+    const out = parseResult(await discover.handler({}, ctx));
 
     expect(out.code).toBe('NETWORK_ERROR');
     expect(out.message).toBe('Could not reach the x402 catalog');
@@ -100,7 +92,7 @@ describe('botwallet_x402_discover', () => {
   it('reports a reply that is not JSON as NETWORK_ERROR with the HTTP status', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>Bad gateway</html>', { status: 502 })));
 
-    const out = parse(await discover.handler({}, ctx));
+    const out = parseResult(await discover.handler({}, ctx));
 
     expect(out.code).toBe('NETWORK_ERROR');
     expect(out.message).toContain('HTTP 502');

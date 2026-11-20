@@ -1,13 +1,17 @@
 // One-time code for revealing Key 1 (a speed bump against revealing it by
 // accident, not a security boundary: the code goes back to the same agent).
 //
-// Port of the backup nonce in packages/cli-go/config/config.go. Same file
-// (~/.botwallet/.backup-nonce), same JSON fields, same 30-second expiry and
-// same deletion rules, so a code started by either tool works in both.
+// Port of the backup nonce in packages/cli-go/config. Same file
+// (~/.botwallet/.backup-nonce), same JSON fields and same deletion rules, so
+// a code started by either tool works in both. The expiry differs: codes
+// last 30 seconds here but 5 minutes in the CLI (its BackupNonceTTL), so a
+// code the CLI started is honoured here for 30 seconds only, and checking it
+// later deletes it from the shared file.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { rfc3339Seconds } from '../utils/bytes.js';
 import { configDir } from './config.js';
 
 /** Same alphabet as the CLI: no l, 1, o, 0 or i. */
@@ -40,7 +44,7 @@ export function writeBackupNonce(code: string, wallet: string, now: Date = new D
   const nonce: BackupNonce = {
     code,
     wallet,
-    created_at: now.toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    created_at: rfc3339Seconds(now),
   };
   fs.mkdirSync(configDir(), { recursive: true, mode: 0o700 });
   fs.writeFileSync(backupNoncePath(), JSON.stringify(nonce), { mode: 0o600 });

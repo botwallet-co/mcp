@@ -12,25 +12,35 @@
 // its Solana signature and the tool that shows how it ends.
 
 import type { ToolContext, ToolResult } from '../types.js';
-import type { BotWallet, BotWalletErrorCode } from '../sdk/index.js';
-import { BotWalletError } from '../sdk/index.js';
-import { formatResult } from '../utils/format.js';
 import {
+  BotWalletError,
+  hasCode,
+  isAlreadyCompleted,
+  isFrozenWallet,
+  isListedAsFailed,
   isNoAnswer,
-  listedAsFailedError,
-  noSeedError,
+  isOwnerSigning,
+  isPendingStatusError,
+  isSentUnconfirmed,
+  type BotWallet,
+} from '../sdk/index.js';
+import { formatResult } from '../utils/tool-result.js';
+import { noSeedError } from '../utils/errors.js';
+import { frostSignAndSubmit, SubmitOutcomeUnknownError, type SigningCheck } from '../frost/index.js';
+import { TransactionCheckError, type TransferKind } from '../solana/index.js';
+import { loadSeed } from '../config/index.js';
+import {
+  alreadySigningError,
   notSentError,
   outcomeUnknownError,
   signingRefusedError,
   transferError,
+  unreadableConfigError,
   type TransferRef,
-} from '../utils/errors.js';
-import { frostSignAndSubmit, SubmitOutcomeUnknownError, type SigningCheck } from '../frost/index.js';
-import { TransactionCheckError, type TransferKind } from '../solana/index.js';
-import { loadSeed } from '../config/index.js';
-import { agreedTransferFor, forgetAgreedTransfer } from '../utils/agreed-transfers.js';
-import { expectedTransfer, localWalletAddress } from '../utils/signing-check.js';
-import { withSigningLock, SigningInProgressError } from '../utils/signing-lock.js';
+} from './results.js';
+import { agreedTransferFor, forgetAgreedTransfer } from './agreed-transfers.js';
+import { expectedTransfer, localWalletAddress } from './signing-check.js';
+import { withSigningLock, SigningInProgressError } from './signing-lock.js';
 
 export interface TransferFlow {
   kind: Exclude<TransferKind, 'x402'>;
@@ -53,7 +63,7 @@ export interface TransferFlow {
 export const PAYMENT_FLOW: TransferFlow = {
   kind: 'payment',
   noun: 'payment',
-  confirm: async (sdk, id) => await sdk.confirmPayment({ transaction_id: id }) as Record<string, unknown>,
+  confirm: (sdk, id) => sdk.confirmPayment({ transaction_id: id }),
   confirmTool: 'botwallet_confirm_payment',
   startTool: 'botwallet_pay',
   checkTool: 'botwallet_list_payments',
@@ -70,7 +80,7 @@ export const PAYMENT_FLOW: TransferFlow = {
 export const WITHDRAWAL_FLOW: TransferFlow = {
   kind: 'withdrawal',
   noun: 'withdrawal',
-  confirm: async (sdk, id) => await sdk.confirmWithdrawal({ withdrawal_id: id }) as Record<string, unknown>,
+  confirm: (sdk, id) => sdk.confirmWithdrawal({ withdrawal_id: id }),
   confirmTool: 'botwallet_confirm_withdrawal',
   startTool: 'botwallet_withdraw',
   checkTool: 'botwallet_get_withdrawal',
@@ -86,22 +96,6 @@ export const WITHDRAWAL_FLOW: TransferFlow = {
     message: 'This withdrawal was completed earlier. Nothing new was sent.',
   }),
 };
-
-/**
- * The server refuses to confirm a transfer that is already being sent:
- * SIGNING_IN_PROGRESS from current servers, INVALID_STATUS for any pending
- * transfer from older ones.
- */
-export function isPendingStatusError(error: unknown): boolean {
-  if (!(error instanceof BotWalletError)) return false;
-  return (error.code as string) === 'SIGNING_IN_PROGRESS' ||
-    (error.code === 'INVALID_STATUS' && /status: pending\b/.test(error.message));
-}
-
-/** The server's answer for a transfer it sent to Solana that isn't confirmed yet. */
-function isSentUnconfirmed(error: unknown): error is BotWalletError {
-  return error instanceof BotWalletError && (error.code as string) === 'SUBMISSION_UNCONFIRMED';
-}
 
 /**
  * The server sent this transfer to Solana and Solana hasn't confirmed it yet.
@@ -127,11 +121,6 @@ function sentUnconfirmed(flow: TransferFlow, id: string, ref: TransferRef, error
   });
 }
 
-/** The owner has frozen the wallet (WALLET_SUSPENDED). */
-function isFrozenWallet(error: unknown): boolean {
-  return error instanceof BotWalletError && error.code === 'WALLET_SUSPENDED';
-}
-
 /**
  * The server turns a frozen wallet's confirm and signing calls away before
  * anything changes, so confirming the same transfer finishes it once the
@@ -144,10 +133,6 @@ function frozenWalletError(flow: TransferFlow, error: unknown, ref: TransferRef)
 }
 
 /** A transfer the owner started on the signing page: only the owner finishes it, there. */
-function isOwnerSigning(error: unknown): boolean {
-  return error instanceof BotWalletError && error.code === 'INVALID_STATUS' && /on the signing page/i.test(error.message);
-}
-
 function ownerSigningError(flow: TransferFlow, id: string, error: unknown, ref: TransferRef): ToolResult {
   return transferError(error, ref,
     `Leave it to your owner: they started this ${flow.noun} on the signing page and finish it there. Do not confirm ` +
@@ -173,16 +158,10 @@ export function inProgressError(flow: TransferFlow, id: string, ref: TransferRef
  * again. `retry` says how to make the transfer again.
  */
 function listedAsFailed(flow: TransferFlow, error: unknown, ref: TransferRef, retry: string): ToolResult {
-  return listedAsFailedError(error, ref,
+  return transferError(error, ref,
     `Botwallet lists this ${flow.noun} as failed, so nothing more will be sent for it. If it failed while it was ` +
     'being sent, it may still have gone through: wait about two minutes, then check botwallet_balance before you ' +
     `make it again. ${retry}`);
-}
-
-/** The server's answer to confirming a transfer it lists as failed. */
-function isListedAsFailed(error: unknown): boolean {
-  return error instanceof BotWalletError &&
-    ((error.code as string) === 'TRANSACTION_FAILED' || (error.code as string) === 'WITHDRAWAL_FAILED');
 }
 
 /**
@@ -206,7 +185,7 @@ export function replayedTransfer(
       return listedAsFailed(
         flow,
         new BotWalletError(
-          `${flow.kind.toUpperCase()}_FAILED` as BotWalletErrorCode,
+          `${flow.kind.toUpperCase()}_FAILED`,
           `The ${flow.noun} made with this idempotency_key failed.`,
         ),
         ref,
@@ -217,7 +196,7 @@ export function replayedTransfer(
     case 'denied':
       return notSentError(
         new BotWalletError(
-          `${flow.kind.toUpperCase()}_${String(status).toUpperCase()}` as BotWalletErrorCode,
+          `${flow.kind.toUpperCase()}_${String(status).toUpperCase()}`,
           `The ${flow.noun} made with this idempotency_key is ${String(status)}. Nothing more will be sent for it.`,
         ),
         ref,
@@ -244,8 +223,8 @@ export async function completeTransfer(
     return await withSigningLock(id, () => confirmAndSign(ctx, flow, id, ref, extra));
   } catch (e) {
     if (e instanceof SigningInProgressError) {
-      return outcomeUnknownError(
-        `This ${flow.noun} is already being signed by another request.`,
+      return alreadySigningError(
+        flow.noun,
         `Wait for that request to finish, then check ${flow.checkTool}. Do not call ${flow.startTool} again for it.`,
         ref,
         { check_tool: flow.checkTool, check_args: flow.checkArgs(id) },
@@ -273,13 +252,21 @@ async function confirmAndSign(
   } catch (e) {
     return notSentError(e, ref);
   }
+  // The same for the address Key 1 may sign for
+  let walletAddress: string | undefined;
+  try {
+    walletAddress = localWalletAddress(walletName);
+  } catch (e) {
+    return unreadableConfigError(e, ref,
+      `Then call ${flow.confirmTool} again with this transaction_id; do not call ${flow.startTool} again for it.`);
+  }
 
   // 1. The server builds the transaction. Nothing is signed yet.
   let confirm: Record<string, unknown>;
   try {
     confirm = await flow.confirm(ctx.sdk, id);
   } catch (e) {
-    if (e instanceof BotWalletError && (e.code as string) === 'ALREADY_COMPLETED') return formatResult(flow.alreadyDone(ref));
+    if (isAlreadyCompleted(e)) return formatResult(flow.alreadyDone(ref));
     // Sent earlier and not confirmed yet
     if (isSentUnconfirmed(e)) return sentUnconfirmed(flow, id, ref, e);
     if (isPendingStatusError(e)) return inProgressError(flow, id, ref);
@@ -306,7 +293,7 @@ async function confirmAndSign(
   // 2. Key 1 checks the transaction and co-signs; the server submits it
   try {
     const check: SigningCheck = {
-      walletAddress: localWalletAddress(walletName),
+      walletAddress,
       transfer: expectedTransfer(flow.kind, confirm, agreedTransferFor(id)),
     };
     const result = await frostSignAndSubmit(ctx.sdk, mnemonic, id, message, check);
@@ -315,7 +302,7 @@ async function confirmAndSign(
   } catch (e) {
     // Sent, by this round or one before it: not confirmed yet, or confirmed
     if (isSentUnconfirmed(e)) return sentUnconfirmed(flow, id, ref, e);
-    if (e instanceof BotWalletError && (e.code as string) === 'ALREADY_COMPLETED') {
+    if (isAlreadyCompleted(e)) {
       forgetAgreedTransfer(id);
       return formatResult(flow.alreadyDone(ref));
     }
@@ -341,7 +328,7 @@ async function confirmAndSign(
     }
     if (e instanceof TransactionCheckError) return signingRefusedError(e, ref, flow.noun);
     // Solana turned the transaction down before taking it: the server marked it failed and says what to do
-    if (e instanceof BotWalletError && (e.code as string) === 'TRANSACTION_FAILED') return notSentError(e, ref);
+    if (hasCode(e, 'TRANSACTION_FAILED')) return notSentError(e, ref);
     // Turned away before anything was signed: frozen meanwhile, or the owner's own transfer
     if (isFrozenWallet(e)) return frozenWalletError(flow, e, ref);
     if (isOwnerSigning(e)) return ownerSigningError(flow, id, e, ref);

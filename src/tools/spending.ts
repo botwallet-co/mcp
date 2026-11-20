@@ -2,29 +2,29 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ToolDefinition, ToolResult } from '../types.js';
 import { READ_ONLY, CANNOT_UNDO, MOVES_MONEY } from '../utils/annotations.js';
-import { formatResult } from '../utils/format.js';
+import { formatResult, toolError } from '../utils/tool-result.js';
+import { errorMessage, invalidAddressError, noSeedError } from '../utils/errors.js';
+import { AmountSchema, UsernameSchema, PaginationSchema, stripAtPrefix } from '../utils/schemas.js';
+import { isNoAnswer } from '../sdk/index.js';
+import { decodeAddress, usdToBaseUnits, SOLANA_ADDRESS_PATTERN } from '../solana/index.js';
 import {
-  formatToolError,
+  completeTransfer,
   guardRailBlockedError,
-  isNoAnswer,
-  noSeedError,
   notSentError,
   outcomeUnknownError,
-  toolError,
+  rememberAgreedTransfer,
+  replayedTransfer,
+  PAYMENT_FLOW,
+  type AgreedTransfer,
   type TransferRef,
-} from '../utils/errors.js';
-import { AmountSchema, UsernameSchema, PaginationSchema, stripAtPrefix } from '../utils/schemas.js';
-import { usdToBaseUnits } from '../solana/index.js';
-import { rememberAgreedTransfer, type AgreedTransfer } from '../utils/agreed-transfers.js';
-import { completeTransfer, replayedTransfer, PAYMENT_FLOW } from './complete-transfer.js';
-
-// The server pays a `to` that looks like a Solana address directly, without a
-// username lookup (isValidSolanaAddress in supabase/functions/_shared/db.ts)
-const SOLANA_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+} from '../transfers/index.js';
+import { apiTool, defineTool } from './define.js';
+import { confirmOutcomeUnknownHelp, PAYMENT_FEES, sentPendingHelp } from './descriptions.js';
 
 /**
  * What the agent agreed to pay: its own amount, or for a paylink the amount
- * Botwallet quoted, and the recipient when it gave an address.
+ * Botwallet quoted, and the recipient when it gave an address (the server
+ * pays a `to` that looks like an address directly, without a username lookup).
  */
 function agreedPayment(
   args: { to?: string; amount?: number; payment_request_id?: string },
@@ -35,7 +35,7 @@ function agreedPayment(
   if (amount === null || amount <= 0n) return undefined;
   return {
     amount,
-    recipient: !args.payment_request_id && args.to && SOLANA_ADDRESS.test(args.to) ? args.to : undefined,
+    recipient: !args.payment_request_id && args.to && SOLANA_ADDRESS_PATTERN.test(args.to) ? args.to : undefined,
     quotedFee: usdToBaseUnits(result.fee_usdc) ?? undefined,
   };
 }
@@ -46,7 +46,7 @@ function usernameRequired(field: string): ToolResult {
     'Give the recipient\'s Botwallet username, e.g. clever-byte-1234.');
 }
 
-const lookup: ToolDefinition = {
+const lookup = defineTool({
   name: 'botwallet_lookup',
   annotations: READ_ONLY,
   description:
@@ -55,19 +55,15 @@ const lookup: ToolDefinition = {
   inputSchema: z.object({
     username: UsernameSchema.describe('Username to look up, e.g. clever-byte-1234 (a leading @ is accepted)'),
   }),
-  async handler(args, ctx) {
-    try {
-      const username = stripAtPrefix((args as { username: string }).username);
-      if (!username) return usernameRequired('username');
-      const result = await ctx.sdk.lookup({ username });
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
+  async run(args, ctx) {
+    const username = stripAtPrefix(args.username);
+    if (!username) return usernameRequired('username');
+    const result = await ctx.sdk.lookup({ username });
+    return formatResult(result);
   },
-};
+});
 
-const canIAfford: ToolDefinition = {
+const canIAfford = defineTool({
   name: 'botwallet_can_i_afford',
   annotations: READ_ONLY,
   description:
@@ -79,88 +75,82 @@ const canIAfford: ToolDefinition = {
     '(`recipient_found: false`) or can\'t receive payments (`recipient_can_receive: false`), or your owner\'s ' +
     'guard rails block this payment (`blocked: true`, with the reason and `owner_message`). ' +
     'Don\'t ask your owner for funds unless `can_afford` is false. ' +
-    'Fees: $0.01 minimum or 1% of the transaction amount, whichever is greater, ' +
-    'plus a one-time $0.25 account setup fee if the recipient\'s address has never held USDC. ' +
+    `${PAYMENT_FEES} ` +
     'Always call this before botwallet_pay if unsure about your balance.',
   inputSchema: z.object({
     to: UsernameSchema.describe('Recipient username (a leading @ is accepted)'),
     amount: AmountSchema.describe('Amount in USD'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { amount } = args as { amount: number };
-      const to = stripAtPrefix((args as { to: string }).to);
-      if (!to) return usernameRequired('to');
-      const apiResult = await ctx.sdk.canIAfford({ to, amount });
-      const result = apiResult as unknown as Record<string, unknown>;
+  async run(args, ctx) {
+    const { amount } = args;
+    const to = stripAtPrefix(args.to);
+    if (!to) return usernameRequired('to');
+    const result = await ctx.sdk.canIAfford({ to, amount });
 
-      if (result.can_pay) {
-        return formatResult({
-          ...result,
-          can_afford: true,
-          will_auto_approve: true,
-        });
-      }
-
-      if (result.reason === 'needs_approval') {
-        return formatResult({
-          ...result,
-          can_afford: true,
-          will_auto_approve: false,
-          needs_approval: true,
-        });
-      }
-
-      if (result.reason === 'insufficient_funds') {
-        return formatResult({
-          ...result,
-          can_afford: false,
-          will_auto_approve: false,
-        });
-      }
-
-      // The server checks the recipient and the guard rails before the
-      // balance, so in the cases below it is not known whether you can afford it
-      if (result.reason === 'recipient_not_found') {
-        return formatResult({
-          ...result,
-          recipient_found: false,
-          can_afford: null,
-          will_auto_approve: null,
-          blocked: false,
-          // The server looks up usernames only; botwallet_pay also takes an address
-          ...(SOLANA_ADDRESS.test(to)
-            ? { note: 'This check works with usernames only. botwallet_pay can pay a Solana address directly.' }
-            : {}),
-        });
-      }
-
-      if (result.reason === 'recipient_inactive' || result.reason === 'recipient_suspended') {
-        return formatResult({
-          ...result,
-          recipient_found: true,
-          recipient_can_receive: false,
-          can_afford: null,
-          will_auto_approve: null,
-          blocked: false,
-        });
-      }
-
-      // The owner's guard rails block this payment (suspended wallet, spending
-      // cap, blocked recipient, ...): result.reason names the rule
+    if (result.can_pay) {
       return formatResult({
         ...result,
-        can_afford: null,
-        will_auto_approve: false,
-        blocked: true,
+        can_afford: true,
+        will_auto_approve: true,
       });
-    } catch (e) {
-      return formatToolError(e);
     }
-  },
-};
 
-const pay: ToolDefinition = {
+    if (result.reason === 'needs_approval') {
+      return formatResult({
+        ...result,
+        can_afford: true,
+        will_auto_approve: false,
+        needs_approval: true,
+      });
+    }
+
+    if (result.reason === 'insufficient_funds') {
+      return formatResult({
+        ...result,
+        can_afford: false,
+        will_auto_approve: false,
+      });
+    }
+
+    // The server checks the recipient and the guard rails before the
+    // balance, so in the cases below it is not known whether you can afford it
+    if (result.reason === 'recipient_not_found') {
+      return formatResult({
+        ...result,
+        recipient_found: false,
+        can_afford: null,
+        will_auto_approve: null,
+        blocked: false,
+        // The server looks up usernames only; botwallet_pay also takes an address
+        ...(SOLANA_ADDRESS_PATTERN.test(to)
+          ? { note: 'This check works with usernames only. botwallet_pay can pay a Solana address directly.' }
+          : {}),
+      });
+    }
+
+    if (result.reason === 'recipient_inactive' || result.reason === 'recipient_suspended') {
+      return formatResult({
+        ...result,
+        recipient_found: true,
+        recipient_can_receive: false,
+        can_afford: null,
+        will_auto_approve: null,
+        blocked: false,
+      });
+    }
+
+    // The owner's guard rails block this payment (suspended wallet, spending
+    // cap, blocked recipient, ...): result.reason names the rule
+    return formatResult({
+      ...result,
+      can_afford: null,
+      will_auto_approve: false,
+      blocked: true,
+    });
+  },
+});
+
+const pay = defineTool({
   name: 'botwallet_pay',
   annotations: MOVES_MONEY,
   description:
@@ -178,10 +168,8 @@ const pay: ToolDefinition = {
     'calling botwallet_pay again: to retry the same payment, pass the same `idempotency_key`, and Botwallet returns ' +
     'that payment instead of paying twice. An error with code OUTCOME_UNKNOWN means the payment may have gone through: ' +
     'check the tool its `check_tool` names (usually botwallet_list_payments with its `transaction_id`) first. ' +
-    'A result with `status: "pending"` and `sent: true` means the payment was sent and Solana has not confirmed it yet: ' +
-    'do not pay again; check `check_tool` in about a minute. ' +
-    'Fees: $0.01 minimum or 1% of the transaction amount, whichever is greater, ' +
-    'plus a one-time $0.25 account setup fee if the recipient\'s address has never held USDC. ' +
+    `${sentPendingHelp('payment', 'do not pay again')} ` +
+    `${PAYMENT_FEES} ` +
     'Always call botwallet_can_i_afford first if unsure about your balance.',
   inputSchema: z.object({
     to: UsernameSchema.optional()
@@ -197,113 +185,107 @@ const pay: ToolDefinition = {
       .describe('To retry a payment, pass the idempotency_key from its earlier response, with the same arguments. ' +
         'If omitted, a new key is made, so the call is a new payment.'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { amount, payment_request_id, note, reference, idempotency_key } = args as {
-        amount?: number; payment_request_id?: string;
-        note?: string; reference?: string; idempotency_key?: string;
-      };
-      // The same value goes to the server and to the recipient check before signing
-      const rawTo = (args as { to?: string }).to;
-      const to = rawTo === undefined ? undefined : stripAtPrefix(rawTo);
-      if (to === '') return usernameRequired('to');
+  async run(args, ctx) {
+    const { amount, payment_request_id, note, reference, idempotency_key } = args;
+    // The same value goes to the server and to the recipient check before signing
+    const rawTo = args.to;
+    const to = rawTo === undefined ? undefined : stripAtPrefix(rawTo);
+    if (to === '') return usernameRequired('to');
+    if (to !== undefined && SOLANA_ADDRESS_PATTERN.test(to) && !decodeAddress(to)) return invalidAddressError();
 
-      // Key 1 signs every payment. Check for it before anything is created on the
-      // server, so a missing key share never leaves a payment behind that counts
-      // against the spending limit.
-      if (!ctx.config.hasSeed || !ctx.config.walletName) {
-        return noSeedError('make a payment (FROST signing)', ctx.config.walletName);
-      }
-
-      const idemKey = idempotency_key || randomUUID();
-      let result: Record<string, unknown>;
-      try {
-        const payResult = await ctx.sdk.pay({ to, amount, payment_request_id, note, reference }, idemKey);
-        result = payResult as unknown as Record<string, unknown>;
-      } catch (e) {
-        if (!isNoAnswer(e)) throw e;
-        // Key 1 signs only after the payment exists, so nothing was sent
-        return outcomeUnknownError(
-          `No answer from Botwallet (${(e as Error).message}), so it isn't known whether the payment was created. ` +
-          'Nothing was signed, so no money moved.',
-          `Call botwallet_pay again with the same arguments and idempotency_key "${idemKey}": ` +
-          'Botwallet then returns the payment it already created instead of making a second one.',
-          { idempotency_key: idemKey },
-        );
-      }
-
-      const txId = typeof result.transaction_id === 'string' && result.transaction_id ? result.transaction_id : undefined;
-      const ref: TransferRef = txId ? { transaction_id: txId, idempotency_key: idemKey } : { idempotency_key: idemKey };
-
-      // Same idempotency_key as an earlier call: report what became of that payment
-      if (result.idempotent && txId) {
-        const replay = replayedTransfer(PAYMENT_FLOW, result.status, txId, ref, {
-          to: result.to,
-          amount_usdc: result.amount_usdc,
-          fee_usdc: result.fee_usdc,
-        });
-        if (replay) return replay;
-      }
-
-      if (txId) {
-        const agreed = agreedPayment({ to, amount, payment_request_id }, result);
-        if (agreed) rememberAgreedTransfer(txId, agreed);
-      }
-
-      // Awaiting owner approval — return structured response (not an error)
-      if (result.status === 'awaiting_approval') {
-        return formatResult({
-          needs_approval: true,
-          transaction_id: result.transaction_id,
-          idempotency_key: idemKey,
-          approval_id: result.approval_id,
-          approval_url: result.approval_url,
-          message: result.message,
-          approval_reason: result.approval_reason,
-          guard_rail: result.guard_rail,
-          amount_usdc: result.amount_usdc,
-          fee_usdc: result.fee_usdc,
-          total_usdc: result.total_usdc,
-          to: result.to,
-          note,
-          next_step: 'Send the approval_url to your human owner and tell them that approving does not send the payment by itself. ' +
-            'Once they approve, call botwallet_confirm_payment with the transaction_id to complete it. Approvals expire after 24 hours.',
-          confirm_tool: 'botwallet_confirm_payment',
-          confirm_args: { transaction_id: result.transaction_id },
-          check_tool: 'botwallet_approval_status',
-          check_args: { approval_id: result.approval_id },
-          expires_at: result.expires_at,
-        });
-      }
-
-      // Blocked by the owner's guard rails — surface the server's reason
-      if (result.status === 'rejected' || result.status === 'blocked') {
-        return guardRailBlockedError(result, 'payment');
-      }
-
-      // Already completed (custodial or server-signed)
-      if (result.paid) {
-        return formatResult({ ...result, idempotency_key: idemKey });
-      }
-
-      // Ready to sign (pre-approved, or approved by the owner since an earlier
-      // call with this key): confirm -> check -> FROST sign -> submit
-      if ((result.status === 'pre_approved' || result.status === 'approved') && txId) {
-        return await completeTransfer(ctx, PAYMENT_FLOW, txId, ref,
-          result.status === 'pre_approved' ? { auto_approved: true } : {});
-      }
-
-      return notSentError(new Error(
-        `Unexpected payment response from server (status: ${String(result.status)}). ` +
-        'Check status with botwallet_list_payments or botwallet_events.'
-      ), ref);
-    } catch (e) {
-      return formatToolError(e);
+    // Key 1 signs every payment. Check for it before anything is created on the
+    // server, so a missing key share never leaves a payment behind that counts
+    // against the spending limit.
+    if (!ctx.config.hasSeed || !ctx.config.walletName) {
+      return noSeedError('make a payment (FROST signing)', ctx.config.walletName);
     }
-  },
-};
 
-const confirmPayment: ToolDefinition = {
+    const idemKey = idempotency_key || randomUUID();
+    // Read as untyped: every field is checked before it is relied on
+    let result: Record<string, unknown>;
+    try {
+      result = await ctx.sdk.pay({ to, amount, payment_request_id, note, reference }, idemKey);
+    } catch (e) {
+      if (!isNoAnswer(e)) throw e;
+      // Key 1 signs only after the payment exists, so nothing was sent
+      return outcomeUnknownError(
+        `No answer from Botwallet (${errorMessage(e)}), so it isn't known whether the payment was created. ` +
+        'Nothing was signed, so no money moved.',
+        `Call botwallet_pay again with the same arguments and idempotency_key "${idemKey}": ` +
+        'Botwallet then returns the payment it already created instead of making a second one.',
+        { idempotency_key: idemKey },
+      );
+    }
+
+    const txId = typeof result.transaction_id === 'string' && result.transaction_id ? result.transaction_id : undefined;
+    const ref: TransferRef = txId ? { transaction_id: txId, idempotency_key: idemKey } : { idempotency_key: idemKey };
+
+    // Same idempotency_key as an earlier call: report what became of that payment
+    if (result.idempotent && txId) {
+      const replay = replayedTransfer(PAYMENT_FLOW, result.status, txId, ref, {
+        to: result.to,
+        amount_usdc: result.amount_usdc,
+        fee_usdc: result.fee_usdc,
+      });
+      if (replay) return replay;
+    }
+
+    if (txId) {
+      const agreed = agreedPayment({ to, amount, payment_request_id }, result);
+      if (agreed) rememberAgreedTransfer(txId, agreed);
+    }
+
+    // Awaiting owner approval — return structured response (not an error)
+    if (result.status === 'awaiting_approval') {
+      return formatResult({
+        needs_approval: true,
+        transaction_id: result.transaction_id,
+        idempotency_key: idemKey,
+        approval_id: result.approval_id,
+        approval_url: result.approval_url,
+        message: result.message,
+        approval_reason: result.approval_reason,
+        guard_rail: result.guard_rail,
+        amount_usdc: result.amount_usdc,
+        fee_usdc: result.fee_usdc,
+        total_usdc: result.total_usdc,
+        to: result.to,
+        note,
+        next_step: 'Send the approval_url to your human owner and tell them that approving does not send the payment by itself. ' +
+          'Once they approve, call botwallet_confirm_payment with the transaction_id to complete it. Approvals expire after 24 hours.',
+        confirm_tool: 'botwallet_confirm_payment',
+        confirm_args: { transaction_id: result.transaction_id },
+        check_tool: 'botwallet_approval_status',
+        check_args: { approval_id: result.approval_id },
+        expires_at: result.expires_at,
+      });
+    }
+
+    // Blocked by the owner's guard rails — surface the server's reason
+    if (result.status === 'rejected' || result.status === 'blocked') {
+      return guardRailBlockedError(result, 'payment');
+    }
+
+    // Already completed (custodial or server-signed)
+    if (result.paid) {
+      return formatResult({ ...result, idempotency_key: idemKey });
+    }
+
+    // Ready to sign (pre-approved, or approved by the owner since an earlier
+    // call with this key): confirm -> check -> FROST sign -> submit
+    if ((result.status === 'pre_approved' || result.status === 'approved') && txId) {
+      return await completeTransfer(ctx, PAYMENT_FLOW, txId, ref,
+        result.status === 'pre_approved' ? { auto_approved: true } : {});
+    }
+
+    return notSentError(new Error(
+      `Unexpected payment response from server (status: ${String(result.status)}). ` +
+      'Check status with botwallet_list_payments or botwallet_events.'
+    ), ref);
+  },
+});
+
+const confirmPayment = defineTool({
   name: 'botwallet_confirm_payment',
   annotations: MOVES_MONEY,
   description:
@@ -313,28 +295,22 @@ const confirmPayment: ToolDefinition = {
     'the agreed amount plus at most the quoted fee. The amount and recipient are checked against what the agent asked ' +
     'for only if this MCP server started the payment and has not restarted since; otherwise against the ones Botwallet ' +
     'recorded, with the fee still capped. ' +
-    'An error with code OUTCOME_UNKNOWN means the payment may have gone through: check the tool its `check_tool` ' +
-    'names (usually botwallet_list_payments with the transaction_id) before doing anything else. ' +
-    'A result with `status: "pending"` and `sent: true` means the payment was sent and Solana has not confirmed it yet: ' +
-    'do not pay again; check `check_tool` in about a minute.',
+    `${confirmOutcomeUnknownHelp('payment', 'botwallet_list_payments with the transaction_id')} ` +
+    sentPendingHelp('payment', 'do not pay again'),
   inputSchema: z.object({
     transaction_id: z.string().describe('Transaction ID from the original payment or approval event'),
   }),
-  async handler(args, ctx) {
-    try {
-      if (!ctx.config.hasSeed || !ctx.config.walletName) {
-        return noSeedError('confirm payment (FROST signing)', ctx.config.walletName);
-      }
-
-      const { transaction_id } = args as { transaction_id: string };
-      return await completeTransfer(ctx, PAYMENT_FLOW, transaction_id, { transaction_id });
-    } catch (e) {
-      return formatToolError(e);
+  async run(args, ctx) {
+    if (!ctx.config.hasSeed || !ctx.config.walletName) {
+      return noSeedError('confirm payment (FROST signing)', ctx.config.walletName);
     }
-  },
-};
 
-const listPayments: ToolDefinition = {
+    const { transaction_id } = args;
+    return await completeTransfer(ctx, PAYMENT_FLOW, transaction_id, { transaction_id });
+  },
+});
+
+const listPayments = apiTool({
   name: 'botwallet_list_payments',
   annotations: READ_ONLY,
   description:
@@ -347,17 +323,12 @@ const listPayments: ToolDefinition = {
     status: z.enum(['pending', 'pre_approved', 'approved', 'completed', 'cancelled', 'expired', 'all']).optional()
       .describe('Filter by payment status (default: actionable — pending, pre_approved, approved)'),
   }),
-  async handler(args, ctx) {
-    try {
-      const result = await ctx.sdk.listPayments(args as Record<string, unknown>);
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  // Cancelling a payment marks it expired, and the API has no 'cancelled'
+  // status (it fails on one), so 'cancelled' lists expired payments, as in the CLI
+  call: (sdk, args) => sdk.listPayments(args.status === 'cancelled' ? { ...args, status: 'expired' } : args),
+});
 
-const cancelPayment: ToolDefinition = {
+const cancelPayment = apiTool({
   name: 'botwallet_cancel_payment',
   annotations: CANNOT_UNDO,
   description:
@@ -366,16 +337,8 @@ const cancelPayment: ToolDefinition = {
   inputSchema: z.object({
     transaction_id: z.string().describe('Transaction ID of the payment to cancel'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { transaction_id } = args as { transaction_id: string };
-      const result = await ctx.sdk.cancelPayment({ transaction_id });
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  call: (sdk, { transaction_id }) => sdk.cancelPayment({ transaction_id }),
+});
 
 export const spendingTools: ToolDefinition[] = [
   lookup,

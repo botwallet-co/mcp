@@ -12,8 +12,8 @@
 // what the agent agreed to (solana/verify-transaction.ts). On any mismatch
 // nothing is signed.
 
-import type { BotWallet } from '../sdk/index.js';
-import { BotWalletError } from '../sdk/index.js';
+import { BotWalletError, hasCode, type BotWallet } from '../sdk/index.js';
+import { base64ToBytes, bytesToBase64 } from '../utils/bytes.js';
 import { generateNonce, partialSign } from './core.js';
 import { keyShareFromMnemonic, decodePoint } from './encoding.js';
 import { bytesEqual, decodeAddress, encodeAddress } from '../solana/message.js';
@@ -195,10 +195,10 @@ export async function frostSignAndSubmit(
       session_id: sessionId,
       partial_sig: partialSigB64,
     });
-    return submitResult as unknown as Record<string, unknown>;
+    return submitResult;
   } catch (e) {
     if (e instanceof BotWalletError && (NOT_SUBMITTED_CODES.has(e.code) || SENT_CODES.has(e.code))) throw e;
-    if (e instanceof BotWalletError && (e.code as string) === 'TRANSACTION_FAILED') {
+    if (hasCode(e, 'TRANSACTION_FAILED')) {
       if (rejectedBeforeSending(e)) throw e;
       throw new SubmitOutcomeUnknownError(e, true);
     }
@@ -227,13 +227,5 @@ export async function frostSignForX402(
     partial_sig: partialSigB64,
   });
 
-  return signResult as unknown as Record<string, unknown>;
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(b64, 'base64'));
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  return Buffer.from(bytes).toString('base64');
+  return signResult;
 }

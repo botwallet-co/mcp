@@ -7,7 +7,7 @@
 // builds any other legacy message, for the transactions a server must not be
 // able to get signed.
 
-import { sha256 } from '@noble/hashes/sha256';
+import { sha256 } from '@noble/hashes/sha2';
 import { base58 } from '@scure/base';
 import {
   associatedTokenAddress,

@@ -6,7 +6,7 @@
 // legacy (unversioned) message with Botwallet's fee payer and the wallet as
 // the two signers.
 
-import { sha256 } from '@noble/hashes/sha256';
+import { sha256 } from '@noble/hashes/sha2';
 import { ed25519 } from '@noble/curves/ed25519';
 import { base58 } from '@scure/base';
 
@@ -128,6 +128,14 @@ export function parseLegacyMessage(bytes: Uint8Array): LegacyMessage {
   };
 }
 
+/**
+ * What a Solana address looks like: 32 to 44 base58 characters. The server
+ * treats any such string as an address (isValidSolanaAddress in
+ * supabase/functions/_shared); decodeAddress also checks that
+ * it decodes to 32 bytes.
+ */
+export const SOLANA_ADDRESS_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
 /** Decode a Solana address, or return null when it isn't a 32-byte base58 key. */
 export function decodeAddress(address: string): Uint8Array | null {
   try {
@@ -155,7 +163,7 @@ function isOnCurve(bytes: Uint8Array): boolean {
 
 /**
  * The associated token account of `owner` for `mint`. Same derivation as the
- * server's computeATA (supabase/functions/_shared/solana/transaction.ts).
+ * server's computeATA (supabase/functions/_shared/solana/ata.ts).
  */
 export function associatedTokenAddress(owner: Uint8Array, mint: Uint8Array): Uint8Array {
   const tokenProgram = base58.decode(TOKEN_PROGRAM_ID);

@@ -14,24 +14,26 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import {
-  availableNetworks,
-  buildXPaymentHeader,
+  checkAnsweringHost,
   checkPaidRequest,
   checkUrl,
   fetchWithPayment,
-  findSolanaOption,
-  getAmount,
-  isPayableOption,
-  isSolanaNetwork,
-  normalizeSolanaNetwork,
-  parse402Response,
   probeUrl,
   readResponseBody,
   requireHttps,
   validateUrl,
   X402RequestError,
+} from '../../../src/x402/client.js';
+import {
+  availableNetworks,
+  buildXPaymentHeader,
+  findSolanaOption,
+  getAmount,
+  isPayableOption,
+  normalizeSolanaNetwork,
+  parse402Response,
   type X402PaymentOption,
-} from '../../../src/utils/x402-client.js';
+} from '../../../src/x402/parser.js';
 import { testAddress, USDC_DEVNET, USDC_MAINNET } from '../../helpers/solana-messages.js';
 
 const PAY_TO = testAddress('merchant');
@@ -136,15 +138,6 @@ describe('getAmount', () => {
 });
 
 describe('Solana networks', () => {
-  it('recognises short names and CAIP-2 ids only', () => {
-    for (const n of ['solana', 'Solana-Mainnet', 'solana-devnet', CAIP2_MAINNET, CAIP2_DEVNET]) {
-      expect(isSolanaNetwork(n)).toBe(true);
-    }
-    for (const n of ['base', 'eip155:8453', 'not-solana', 'solanax', '']) {
-      expect(isSolanaNetwork(n)).toBe(false);
-    }
-  });
-
   it('converts to the names the Botwallet server accepts', () => {
     const cases: Record<string, string> = {
       solana: 'solana',
@@ -154,6 +147,8 @@ describe('Solana networks', () => {
       'Solana-Devnet': 'solana-devnet',
       [CAIP2_DEVNET]: 'solana-devnet',
       base: 'base',
+      // A Solana cluster Botwallet doesn't pay on stays as it is, as in the CLI
+      'solana-testnet': 'solana-testnet',
     };
     for (const [input, want] of Object.entries(cases)) {
       expect(normalizeSolanaNetwork(input), input).toBe(want);
@@ -302,10 +297,54 @@ describe('requireHttps and checkPaidRequest', () => {
   });
 });
 
+describe('checkAnsweringHost', () => {
+  const PROBED = 'https://api.example.com/data';
+
+  for (const answered of [
+    PROBED,
+    'https://api.example.com/v2/data?q=1',
+    'https://api.example.com:8443/data',
+    'https://API.Example.COM/data',
+    'https://api.example.com./data',
+  ]) {
+    it(`accepts an answer from ${answered}`, () => {
+      expect(() => checkAnsweringHost(PROBED, answered)).not.toThrow();
+    });
+  }
+
+  it('accepts a redirect from HTTP to HTTPS on the same host', () => {
+    expect(() => checkAnsweringHost('http://api.example.com/data', PROBED)).not.toThrow();
+  });
+
+  for (const [answered, host] of [
+    ['https://pay.other.example/data', 'pay.other.example'],
+    ['https://eu.api.example.com/data', 'eu.api.example.com'],
+    ['https://example.com/data', 'example.com'],
+    ['https://api.example.com.evil.example/data', 'api.example.com.evil.example'],
+    ['https://93.184.215.14/data', '93.184.215.14'],
+  ]) {
+    it(`refuses an answer from ${answered}, naming both hosts`, () => {
+      expect(() => checkAnsweringHost(PROBED, answered)).toThrow(X402RequestError);
+      expect(() => checkAnsweringHost(PROBED, answered))
+        .toThrow(`api.example.com redirected to another host, ${host}. Nothing was prepared or paid`);
+    });
+  }
+});
+
+describe('checkAnsweringHost and look-alike letters', () => {
+  // "İ" (U+0130) lower-cases to "i" in some libraries, but it is another DNS name.
+  // The CLI's CheckAnsweringHost must refuse this pair too.
+  it('refuses a host that differs by a look-alike letter', () => {
+    const answered = 'https://api.ex\u0130mple.com/data';
+    expect(new URL(answered).hostname).not.toBe('api.example.com');
+    expect(() => checkAnsweringHost('https://api.example.com/data', answered)).toThrow(X402RequestError);
+  });
+});
+
 describe('probeUrl', () => {
   it('follows redirects, checking every address again', async () => {
     dns.answers.set('api.example.com', ['93.184.215.14']);
-    const fetchMock = vi.fn(async (url: string) => {
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
       if (url === 'https://api.example.com/start') {
         return new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/latest/meta-data/' } });
       }

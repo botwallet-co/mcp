@@ -8,7 +8,7 @@
 //     seeds/
 //       <name>.seed        # 12-word mnemonic (FROST S1 key share)
 //
-// The CLI (packages/cli-go/config/config.go) is the reference for this format.
+// The CLI (packages/cli-go/config) is the reference for this format.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -89,13 +89,6 @@ export function saveConfig(config: BotWalletLocalConfig): void {
 export function getWallet(name: string): WalletEntry | undefined {
   const config = loadConfig();
   return config.wallets[name];
-}
-
-export function getDefaultWallet(): { name: string; wallet: WalletEntry } | undefined {
-  const config = loadConfig();
-  const name = config.default_wallet;
-  if (!name || !config.wallets[name]) return undefined;
-  return { name, wallet: config.wallets[name] };
 }
 
 export function listWallets(): { name: string; wallet: WalletEntry; isDefault: boolean }[] {
@@ -186,7 +179,7 @@ function repairSeedFilePaths(config: BotWalletLocalConfig): void {
 
 /**
  * Make a wallet name safe to use as a file name. Port of sanitizeFilename in
- * packages/cli-go/config/config.go: lowercase, spaces become hyphens, only
+ * packages/cli-go/config: lowercase, spaces become hyphens, only
  * a-z, 0-9 and '-' are kept, repeated hyphens collapse, never empty.
  */
 export function sanitizeWalletName(name: string): string {
@@ -197,7 +190,7 @@ export function sanitizeWalletName(name: string): string {
 }
 
 /**
- * Choose a local name for a new wallet. Port of GenerateLocalName in the CLI:
+ * Choose a local name for a new wallet. Port of freeLocalName in packages/cli-go/config:
  * the sanitized name, or name-2, name-3, ... when it is taken. A name is also
  * taken when its seed file exists without a config entry, so a stray key
  * share is never overwritten.
@@ -307,7 +300,7 @@ export function resolveWallet(env: NodeJS.ProcessEnv = process.env): ResolvedWal
 
 /**
  * The API base URL, looked up in the CLI's order (GetBaseURL in
- * packages/cli-go/config/config.go): BOTWALLET_API_URL, then base_url in
+ * packages/cli-go/config): BOTWALLET_API_URL, then base_url in
  * config.json. BOTWALLET_BASE_URL, which older MCP versions documented, is
  * still read, right after BOTWALLET_API_URL. Undefined means the SDK default
  * (https://api.botwallet.co/v1).

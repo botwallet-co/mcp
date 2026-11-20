@@ -3,6 +3,7 @@
 // frost-signing.ts, checks the agent's partial signature and checks that the
 // aggregated signature is a valid Ed25519 signature by the wallet address.
 
+import { vi } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
 import { base58 } from '@scure/base';
 import {
@@ -92,5 +93,20 @@ export class FakeSigner {
     const done = { transactionId: session.transactionId, message, signature };
     this.completed.push(done);
     return done;
+  }
+
+  /** The API's signing calls, answered by this fake server (as vi.fn, so a test can change one). */
+  sdkMethods() {
+    return {
+      frostSignInit: vi.fn(async (p: { transaction_id: string; nonce_commitment: string }) => this.frostSignInit(p)),
+      frostSignComplete: vi.fn(async (p: { session_id: string; partial_sig: string }) => {
+        const done = this.complete(p);
+        return { paid: true, transaction_id: done.transactionId, solana_signature: base58.encode(done.signature) };
+      }),
+      x402SignComplete: vi.fn(async (p: { session_id: string; partial_sig: string }) => {
+        this.complete(p);
+        return { signed_transaction: 'AQID' };
+      }),
+    };
   }
 }

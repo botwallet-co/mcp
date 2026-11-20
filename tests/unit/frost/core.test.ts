@@ -7,7 +7,6 @@ import {
   partialSign,
   verifyPartialSig,
   aggregateSignatures,
-  computeChallenge,
 } from '../../../src/frost/core.js';
 
 describe('FROST core', () => {

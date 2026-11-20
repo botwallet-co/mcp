@@ -4,20 +4,14 @@
 // real against a fake server holding Key 2 (tests/helpers/fake-signer.ts), and
 // the server's transactions are built like buildPaymentTransaction builds them.
 
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { base58 } from '@scure/base';
 
 const testHome = path.join(os.tmpdir(), `bw-payments-test-${Date.now()}`);
-vi.mock('node:os', async () => {
-  const actual = await vi.importActual<typeof import('node:os')>('node:os');
-  return {
-    ...actual,
-    homedir: () => testHome,
-  };
-});
+vi.mock('node:os', async () => (await import('../../helpers/temp-home.js')).osWithHome(() => testHome));
 // Every API host in these tests has a public address; no real DNS lookups
 vi.mock('node:dns/promises', () => ({
   lookup: async () => [{ address: '93.184.215.14', family: 4 }],
@@ -26,13 +20,12 @@ vi.mock('node:dns/promises', () => ({
 import { spendingTools } from '../../../src/tools/spending.js';
 import { withdrawalTools } from '../../../src/tools/withdrawals.js';
 import { x402Tools } from '../../../src/tools/x402.js';
-import {
-  BotWalletError, GuardRailError, NetworkError, TimeoutError, type BotWallet,
-} from '../../../src/sdk/index.js';
-import type { ConfigContext, ToolContext, ToolResult } from '../../../src/types.js';
+import { BotWalletError, GuardRailError, NetworkError, TimeoutError } from '../../../src/sdk/index.js';
+import type { ConfigContext } from '../../../src/types.js';
 import { addWallet, seedFileValue } from '../../../src/config/config.js';
 import { saveSeed } from '../../../src/config/seeds.js';
 import { FakeSigner } from '../../helpers/fake-signer.js';
+import { localWallet, parseResult, TEST_MNEMONIC, toolContext } from '../../helpers/harness.js';
 import { buildServerTransfer, serverX402Fees, testAddress, USDC_MAINNET } from '../../helpers/solana-messages.js';
 
 const tool = (name: string) =>
@@ -44,7 +37,6 @@ const confirmWithdrawal = tool('botwallet_confirm_withdrawal');
 const x402Fetch = tool('botwallet_x402_fetch');
 const x402PayAndFetch = tool('botwallet_x402_pay_and_fetch');
 
-const MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const WALLET_NAME = 'agent';
 const FEE_PAYER = testAddress('fee-payer');
 const FEE_COLLECTION = testAddress('fee-collection');
@@ -55,8 +47,8 @@ const MERCHANT = testAddress('merchant');
 let signer: FakeSigner;
 
 beforeAll(() => {
-  signer = new FakeSigner(MNEMONIC);
-  saveSeed(WALLET_NAME, MNEMONIC);
+  signer = new FakeSigner(TEST_MNEMONIC);
+  saveSeed(WALLET_NAME, TEST_MNEMONIC);
   addWallet(WALLET_NAME, {
     username: 'agent-bot',
     api_key: 'bw_bot_fixture-not-a-real-key',
@@ -119,28 +111,12 @@ function fakeSdk() {
     x402Prepare: vi.fn(),
     x402Confirm: vi.fn(),
     x402Settle: vi.fn(async () => ({ settled: true })),
-    frostSignInit: vi.fn(async (p: { transaction_id: string; nonce_commitment: string }) => signer.frostSignInit(p)),
-    frostSignComplete: vi.fn(async (p: { session_id: string; partial_sig: string }) => {
-      const done = signer.complete(p);
-      return { paid: true, transaction_id: done.transactionId, solana_signature: base58.encode(done.signature) };
-    }),
-    x402SignComplete: vi.fn(async (p: { session_id: string; partial_sig: string }) => {
-      signer.complete(p);
-      return { signed_transaction: 'AQID' };
-    }),
+    ...signer.sdkMethods(),
   };
 }
 
-function makeCtx(sdk: ReturnType<typeof fakeSdk>, config: Partial<ConfigContext> = {}): ToolContext {
-  return {
-    sdk: sdk as unknown as BotWallet,
-    config: { walletName: WALLET_NAME, hasConfig: true, hasSeed: true, ...config },
-  };
-}
-
-function parse(result: ToolResult): Record<string, any> {
-  return JSON.parse(result.content[0].text);
-}
+const makeCtx = (sdk: ReturnType<typeof fakeSdk>, config: Partial<ConfigContext> = {}) =>
+  toolContext(sdk, { ...localWallet(WALLET_NAME), ...config });
 
 function preApproved(id: string, extra: Record<string, unknown> = {}) {
   return { status: 'pre_approved', transaction_id: id, amount_usdc: 5, fee_usdc: 0.05, network: 'mainnet-beta', ...extra };
@@ -150,7 +126,7 @@ const SENT_SIGNATURE = base58.encode(new Uint8Array(64).fill(7));
 
 /** The server's answer (HTTP 202) for a transfer it sent to Solana that isn't confirmed yet. */
 function sentUnconfirmedError(id: string, noun = 'payment', check = `botwallet pay list --id ${id}`) {
-  return new BotWalletError('SUBMISSION_UNCONFIRMED' as never,
+  return new BotWalletError('SUBMISSION_UNCONFIRMED',
     `This ${noun} was sent to Solana but is not confirmed yet, so it may still go through. Do not pay again.`,
     `Check its status in about a minute with: ${check}. It will show completed or failed.`,
     {
@@ -173,7 +149,7 @@ function frozenError() {
 describe('botwallet_pay', () => {
   it('checks for Key 1 before creating a payment', async () => {
     const sdk = fakeSdk();
-    const out = parse(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk, { hasSeed: false })));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk, { hasSeed: false })));
     expect(out.code).toBe('NO_LOCAL_SEED');
     expect(sdk.pay).not.toHaveBeenCalled();
   });
@@ -185,7 +161,7 @@ describe('botwallet_pay', () => {
     sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id));
 
     const result = await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBeUndefined();
     expect(out).toMatchObject({ paid: true, auto_approved: true, transaction_id: id });
@@ -200,7 +176,7 @@ describe('botwallet_pay', () => {
     sdk.pay.mockResolvedValue(preApproved(id));
     sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id));
 
-    const out = parse(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'order-77' }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'order-77' }, makeCtx(sdk)));
     expect(sdk.pay.mock.calls[0][1]).toBe('order-77');
     expect(out.idempotency_key).toBe('order-77');
   });
@@ -210,7 +186,7 @@ describe('botwallet_pay', () => {
     sdk.pay.mockRejectedValue(new TimeoutError(30000));
 
     const result = await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBe(true);
     expect(out.code).toBe('OUTCOME_UNKNOWN');
@@ -227,7 +203,7 @@ describe('botwallet_pay', () => {
     sdk.frostSignComplete.mockRejectedValue(new TimeoutError(30000));
 
     const result = await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBe(true);
     expect(out).toMatchObject({
@@ -248,11 +224,11 @@ describe('botwallet_pay', () => {
     sdk.pay.mockResolvedValue(preApproved(id));
     sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id));
     // An older server marks the payment failed when its request to Solana breaks off
-    sdk.frostSignComplete.mockRejectedValue(new BotWalletError('TRANSACTION_FAILED' as never,
+    sdk.frostSignComplete.mockRejectedValue(new BotWalletError('TRANSACTION_FAILED',
       'error sending request for url: connection closed before message completed',
       'The FROST signature may be invalid or the transaction expired. Create a new payment.'));
 
-    const out = parse(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'OUTCOME_UNKNOWN', transaction_id: id, check_tool: 'botwallet_balance' });
     expect(out.sent).toBeUndefined();
     expect(out.how_to_fix).toMatch(/Do not call botwallet_pay again/);
@@ -264,10 +240,10 @@ describe('botwallet_pay', () => {
     const id = newId('pay');
     sdk.pay.mockResolvedValue(preApproved(id));
     sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id));
-    sdk.frostSignComplete.mockRejectedValue(new BotWalletError('TRANSACTION_FAILED' as never,
+    sdk.frostSignComplete.mockRejectedValue(new BotWalletError('TRANSACTION_FAILED',
       'Transaction simulation failed: Blockhash not found', 'Create a new payment.'));
 
-    const out = parse(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'TRANSACTION_FAILED', sent: false, transaction_id: id });
   });
 
@@ -279,7 +255,7 @@ describe('botwallet_pay', () => {
     sdk.frostSignComplete.mockRejectedValue(sentUnconfirmedError(id));
 
     const result = await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBeUndefined();
     expect(out).toMatchObject({
@@ -303,7 +279,7 @@ describe('botwallet_pay', () => {
     sdk.pay.mockResolvedValue(preApproved(id));
     sdk.confirmPayment.mockRejectedValue(new NetworkError('socket hang up'));
 
-    const out = parse(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
     expect(out).toMatchObject({ sent: false, transaction_id: id });
     expect(out.how_to_fix).toMatch(/botwallet_confirm_payment/);
     expect(sdk.frostSignInit).not.toHaveBeenCalled();
@@ -316,7 +292,7 @@ describe('botwallet_pay', () => {
     sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id, { amount: 50_000_000n }));
 
     const result = await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
 
     expect(result.isError).toBe(true);
     expect(out).toMatchObject({ code: 'TRANSACTION_MISMATCH', sent: false, transaction_id: id });
@@ -329,7 +305,7 @@ describe('botwallet_pay', () => {
     sdk.pay.mockResolvedValue(preApproved(id, { to_address: RECIPIENT }));
     sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id, { toWallet: ATTACKER }));
 
-    const out = parse(await pay.handler({ to: RECIPIENT, amount: 5 }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: RECIPIENT, amount: 5 }, makeCtx(sdk)));
     expect(out.code).toBe('TRANSACTION_MISMATCH');
     expect(sdk.frostSignComplete).not.toHaveBeenCalled();
   });
@@ -340,7 +316,7 @@ describe('botwallet_pay', () => {
     sdk.pay.mockResolvedValue({ idempotent: true, status: 'completed', transaction_id: id, amount_usdc: 5 });
 
     const result = await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'k1' }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
     expect(result.isError).toBeUndefined();
     expect(out).toMatchObject({ paid: true, already_completed: true, transaction_id: id, idempotency_key: 'k1' });
     expect(sdk.confirmPayment).not.toHaveBeenCalled();
@@ -351,7 +327,7 @@ describe('botwallet_pay', () => {
     const id = newId('pay');
     sdk.pay.mockResolvedValue({ idempotent: true, status: 'pending', transaction_id: id });
 
-    const out = parse(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'k2' }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'k2' }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'OUTCOME_UNKNOWN', transaction_id: id, idempotency_key: 'k2' });
     expect(sdk.confirmPayment).not.toHaveBeenCalled();
   });
@@ -361,7 +337,7 @@ describe('botwallet_pay', () => {
     const id = newId('pay');
     sdk.pay.mockResolvedValue({ idempotent: true, status: 'failed', transaction_id: id });
 
-    const out = parse(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'k3' }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'k3' }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'PAYMENT_FAILED', transaction_id: id });
     // An older server may list a payment failed that still went through
     expect(out.sent).toBeUndefined();
@@ -374,7 +350,7 @@ describe('botwallet_pay', () => {
     const id = newId('pay');
     sdk.pay.mockResolvedValue({ idempotent: true, status: 'expired', transaction_id: id });
 
-    const out = parse(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'k4' }, makeCtx(sdk)));
+    const out = parseResult(await pay.handler({ to: 'shop', amount: 5, idempotency_key: 'k4' }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'PAYMENT_EXPIRED', sent: false, transaction_id: id });
   });
 
@@ -384,17 +360,17 @@ describe('botwallet_pay', () => {
     sdk.pay.mockResolvedValue({
       status: 'awaiting_approval', transaction_id: id, approval_id: 'ap-1', amount_usdc: 5, fee_usdc: 0.05,
     });
-    const waiting = parse(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
+    const waiting = parseResult(await pay.handler({ to: 'shop', amount: 5 }, makeCtx(sdk)));
     expect(waiting).toMatchObject({ needs_approval: true, transaction_id: id });
     expect(waiting.idempotency_key).toBeTruthy();
 
     // After approval the server prepares a bigger payment and reports it consistently
     sdk.confirmPayment.mockImplementationOnce(async () => confirmAnswer(id, { amount: 9_000_000n }));
-    const refused = parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
+    const refused = parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(refused.code).toBe('TRANSACTION_MISMATCH');
 
     sdk.confirmPayment.mockImplementationOnce(async () => confirmAnswer(id));
-    const paid = parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
+    const paid = parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(paid).toMatchObject({ paid: true, transaction_id: id });
   });
 });
@@ -403,16 +379,16 @@ describe('botwallet_confirm_payment', () => {
   it('reports a payment completed earlier as paid', async () => {
     const sdk = fakeSdk();
     sdk.confirmPayment.mockRejectedValue(
-      new BotWalletError('ALREADY_COMPLETED' as never, 'This transaction has already been completed'));
-    const out = parse(await confirmPayment.handler({ transaction_id: 'done-1' }, makeCtx(sdk)));
+      new BotWalletError('ALREADY_COMPLETED', 'This transaction has already been completed'));
+    const out = parseResult(await confirmPayment.handler({ transaction_id: 'done-1' }, makeCtx(sdk)));
     expect(out).toMatchObject({ paid: true, already_completed: true, transaction_id: 'done-1' });
   });
 
   it('reports a payment listed as failed without promising nothing was sent', async () => {
     const sdk = fakeSdk();
     sdk.confirmPayment.mockRejectedValue(
-      new BotWalletError('TRANSACTION_FAILED' as never, 'This transaction previously failed', 'Create a new payment'));
-    const out = parse(await confirmPayment.handler({ transaction_id: 'failed-1' }, makeCtx(sdk)));
+      new BotWalletError('TRANSACTION_FAILED', 'This transaction previously failed', 'Create a new payment'));
+    const out = parseResult(await confirmPayment.handler({ transaction_id: 'failed-1' }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'TRANSACTION_FAILED', transaction_id: 'failed-1' });
     expect(out.sent).toBeUndefined();
     expect(out.how_to_fix).toMatch(/botwallet_balance/);
@@ -423,18 +399,18 @@ describe('botwallet_confirm_payment', () => {
     const sdk = fakeSdk();
     sdk.confirmPayment.mockRejectedValue(
       new BotWalletError('INVALID_STATUS', 'Cannot confirm transaction with status: pending'));
-    const out = parse(await confirmPayment.handler({ transaction_id: 'pending-1' }, makeCtx(sdk)));
+    const out = parseResult(await confirmPayment.handler({ transaction_id: 'pending-1' }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'OUTCOME_UNKNOWN', transaction_id: 'pending-1' });
     expect(sdk.frostSignInit).not.toHaveBeenCalled();
   });
 
   it('does not sign a payment that is being signed and sent right now, nor say nothing was sent', async () => {
     const sdk = fakeSdk();
-    sdk.confirmPayment.mockRejectedValue(new BotWalletError('SIGNING_IN_PROGRESS' as never,
+    sdk.confirmPayment.mockRejectedValue(new BotWalletError('SIGNING_IN_PROGRESS',
       'This payment is being signed and sent right now',
       'Do not pay again. Check its status in about a minute with: botwallet pay list --id busy-1',
       { transaction_id: 'busy-1', status: 'pending', check_command: 'botwallet pay list --id busy-1' }));
-    const out = parse(await confirmPayment.handler({ transaction_id: 'busy-1' }, makeCtx(sdk)));
+    const out = parseResult(await confirmPayment.handler({ transaction_id: 'busy-1' }, makeCtx(sdk)));
     expect(out).toMatchObject({
       code: 'OUTCOME_UNKNOWN',
       transaction_id: 'busy-1',
@@ -449,7 +425,7 @@ describe('botwallet_confirm_payment', () => {
     const sdk = fakeSdk();
     sdk.confirmPayment.mockRejectedValue(sentUnconfirmedError('sent-1'));
     const result = await confirmPayment.handler({ transaction_id: 'sent-1' }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
     expect(result.isError).toBeUndefined();
     expect(out).toMatchObject({ status: 'pending', sent: true, transaction_id: 'sent-1', solana_signature: SENT_SIGNATURE });
     expect(sdk.frostSignInit).not.toHaveBeenCalled();
@@ -462,12 +438,12 @@ describe('botwallet_confirm_payment', () => {
 
     // frost_sign_init answers for a payment that was sent in the meantime
     sdk.frostSignInit.mockRejectedValueOnce(sentUnconfirmedError(id));
-    const pending = parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
+    const pending = parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(pending).toMatchObject({ status: 'pending', sent: true, transaction_id: id });
 
     sdk.frostSignComplete.mockRejectedValueOnce(
-      new BotWalletError('ALREADY_COMPLETED' as never, 'This payment was already sent and confirmed'));
-    const done = parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
+      new BotWalletError('ALREADY_COMPLETED', 'This payment was already sent and confirmed'));
+    const done = parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(done).toMatchObject({ paid: true, already_completed: true, transaction_id: id });
     expect(done.sent).toBeUndefined();
   });
@@ -476,7 +452,7 @@ describe('botwallet_confirm_payment', () => {
     const sdk = fakeSdk();
     const id = newId('pay');
     sdk.confirmPayment.mockRejectedValueOnce(frozenError());
-    const atConfirm = parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
+    const atConfirm = parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(atConfirm).toMatchObject({ code: 'WALLET_SUSPENDED', sent: false, transaction_id: id });
     expect(atConfirm.how_to_fix).toMatch(/unfreeze/);
     expect(atConfirm.how_to_fix).toMatch(/call botwallet_confirm_payment with this transaction_id/);
@@ -485,7 +461,7 @@ describe('botwallet_confirm_payment', () => {
     // Frozen between preparing and signing: turned away before anything was sent
     sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id));
     sdk.frostSignComplete.mockRejectedValueOnce(frozenError());
-    const atSigning = parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
+    const atSigning = parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(atSigning).toMatchObject({ code: 'WALLET_SUSPENDED', sent: false, transaction_id: id });
     expect(atSigning.how_to_fix).toMatch(/call botwallet_confirm_payment with this transaction_id/);
   });
@@ -496,7 +472,7 @@ describe('botwallet_confirm_payment', () => {
       'This transfer was started by the wallet owner on the signing page, and only the owner can finish it there',
       'Leave it to the owner. Check it with: botwallet pay list --id own-1',
       { transaction_id: 'own-1', status: 'pending' }));
-    const out = parse(await confirmPayment.handler({ transaction_id: 'own-1' }, makeCtx(sdk)));
+    const out = parseResult(await confirmPayment.handler({ transaction_id: 'own-1' }, makeCtx(sdk)));
     expect(out).toMatchObject({
       code: 'INVALID_STATUS',
       transaction_id: 'own-1',
@@ -514,13 +490,13 @@ describe('botwallet_confirm_payment', () => {
     const sdk = fakeSdk();
     const id = newId('pay');
     sdk.confirmPayment.mockImplementationOnce(async () => confirmAnswer(id, { amount: 9_000_000n, declaredAmountUsd: 5 }));
-    expect(parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk))).code).toBe('TRANSACTION_MISMATCH');
+    expect(parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk))).code).toBe('TRANSACTION_MISMATCH');
 
     sdk.confirmPayment.mockImplementationOnce(async () => confirmAnswer(id, { declaredTo: ATTACKER }));
-    expect(parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk))).code).toBe('TRANSACTION_MISMATCH');
+    expect(parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk))).code).toBe('TRANSACTION_MISMATCH');
 
     sdk.confirmPayment.mockImplementationOnce(async () => confirmAnswer(id));
-    expect(parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)))).toMatchObject({ paid: true });
+    expect(parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)))).toMatchObject({ paid: true });
   });
 
   it('turns away a second request for a payment that is being signed', async () => {
@@ -534,23 +510,75 @@ describe('botwallet_confirm_payment', () => {
     });
 
     const first = confirmPayment.handler({ transaction_id: id }, makeCtx(sdk));
-    const second = parse(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
+    const second = parseResult(await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(second.code).toBe('OUTCOME_UNKNOWN');
     expect(second.message).toMatch(/already being signed/);
 
     release();
-    expect(parse(await first)).toMatchObject({ paid: true, transaction_id: id });
+    expect(parseResult(await first)).toMatchObject({ paid: true, transaction_id: id });
     expect(sdk.confirmPayment).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('with a config.json that cannot be read', () => {
+  // config.json records the wallet's address, which Key 1 checks the server's group key against
+  const configFile = () => path.join(testHome, '.botwallet', 'config.json');
+  let saved: string;
+
+  beforeEach(() => {
+    saved = fs.readFileSync(configFile(), 'utf-8');
+    fs.writeFileSync(configFile(), '{ not json');
+  });
+
+  afterEach(() => {
+    fs.writeFileSync(configFile(), saved);
+  });
+
+  it('Key 1 signs no payment, before Botwallet prepares anything', async () => {
+    const sdk = fakeSdk();
+    const id = newId('pay');
+    sdk.confirmPayment.mockImplementation(async () => confirmAnswer(id));
+
+    const result = await confirmPayment.handler({ transaction_id: id }, makeCtx(sdk));
+    const out = parseResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(out).toMatchObject({ code: 'CONFIG_ERROR', sent: false, transaction_id: id });
+    expect(out.message).toMatch(/is not valid JSON/);
+    expect(out.how_to_fix).toMatch(/call botwallet_confirm_payment again with this transaction_id/);
+    expect(sdk.confirmPayment).not.toHaveBeenCalled();
+    expect(sdk.frostSignInit).not.toHaveBeenCalled();
+  });
+
+  it('Key 1 signs no paid API call, before Botwallet prepares anything', async () => {
+    const sdk = fakeSdk();
+
+    const out = parseResult(await x402PayAndFetch.handler({ fetch_id: 'fx-config' }, makeCtx(sdk)));
+
+    expect(out).toMatchObject({ code: 'CONFIG_ERROR', sent: false, fetch_id: 'fx-config' });
+    expect(out.how_to_fix).toMatch(/botwallet_x402_pay_and_fetch again with the same fetch_id/);
+    expect(sdk.x402Confirm).not.toHaveBeenCalled();
   });
 });
 
 describe('botwallet_withdraw', () => {
   it('checks for Key 1 before asking for a withdrawal', async () => {
     const sdk = fakeSdk();
-    const out = parse(await withdraw.handler(
+    const out = parseResult(await withdraw.handler(
       { amount: 5, to_address: RECIPIENT, reason: 'payout' }, makeCtx(sdk, { hasSeed: false, walletName: undefined })));
     expect(out.code).toBe('NO_LOCAL_SEED');
     expect(sdk.withdraw).not.toHaveBeenCalled();
+  });
+
+  it('refuses a to_address that is not a Solana address before asking for a withdrawal', async () => {
+    // Base58 but 33 bytes (the CLI's test value), and characters base58 doesn't have
+    for (const to_address of ['z'.repeat(44), '0OIl'.repeat(10)]) {
+      const sdk = fakeSdk();
+      const result = await withdraw.handler({ amount: 5, to_address, reason: 'payout' }, makeCtx(sdk));
+      expect(result.isError).toBe(true);
+      expect(parseResult(result)).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Invalid Solana address format' });
+      expect(sdk.withdraw).not.toHaveBeenCalled();
+    }
   });
 
   it('signs only the approved amount to the approved address', async () => {
@@ -560,16 +588,16 @@ describe('botwallet_withdraw', () => {
       status: 'awaiting_approval', withdrawal_id: id, approval_id: 'ap-2', amount_usdc: 5, network_fee_usdc: 0.15,
       to_address: RECIPIENT,
     });
-    const waiting = parse(await withdraw.handler({ amount: 5, to_address: RECIPIENT, reason: 'payout' }, makeCtx(sdk)));
+    const waiting = parseResult(await withdraw.handler({ amount: 5, to_address: RECIPIENT, reason: 'payout' }, makeCtx(sdk)));
     expect(waiting).toMatchObject({ needs_approval: true, transaction_id: id, withdrawal_id: id });
     expect(waiting.idempotency_key).toBeTruthy();
 
     sdk.confirmWithdrawal.mockImplementationOnce(async () => confirmAnswer(id, { toWallet: ATTACKER, fee: 150_000n }));
-    const refused = parse(await confirmWithdrawal.handler({ transaction_id: id }, makeCtx(sdk)));
+    const refused = parseResult(await confirmWithdrawal.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(refused).toMatchObject({ code: 'TRANSACTION_MISMATCH', sent: false });
 
     sdk.confirmWithdrawal.mockImplementationOnce(async () => confirmAnswer(id, { fee: 150_000n }));
-    const done = parse(await confirmWithdrawal.handler({ transaction_id: id }, makeCtx(sdk)));
+    const done = parseResult(await confirmWithdrawal.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(done).toMatchObject({ withdrawn: true, transaction_id: id, withdrawal_id: id });
     expect(done.paid).toBeUndefined();
   });
@@ -577,8 +605,8 @@ describe('botwallet_withdraw', () => {
   it('reports a withdrawal listed as failed without promising nothing was sent', async () => {
     const sdk = fakeSdk();
     sdk.confirmWithdrawal.mockRejectedValue(
-      new BotWalletError('WITHDRAWAL_FAILED' as never, 'This withdrawal previously failed', 'Create a new withdrawal request'));
-    const out = parse(await confirmWithdrawal.handler({ transaction_id: 'wd-failed' }, makeCtx(sdk)));
+      new BotWalletError('WITHDRAWAL_FAILED', 'This withdrawal previously failed', 'Create a new withdrawal request'));
+    const out = parseResult(await confirmWithdrawal.handler({ transaction_id: 'wd-failed' }, makeCtx(sdk)));
     expect(out).toMatchObject({ code: 'WITHDRAWAL_FAILED', withdrawal_id: 'wd-failed' });
     expect(out.sent).toBeUndefined();
     expect(out.how_to_fix).toMatch(/botwallet_balance/);
@@ -591,7 +619,7 @@ describe('botwallet_withdraw', () => {
     sdk.confirmWithdrawal.mockImplementation(async () => confirmAnswer(id, { fee: 150_000n }));
     sdk.frostSignComplete.mockRejectedValue(new NetworkError('socket hang up'));
 
-    const out = parse(await confirmWithdrawal.handler({ transaction_id: id }, makeCtx(sdk)));
+    const out = parseResult(await confirmWithdrawal.handler({ transaction_id: id }, makeCtx(sdk)));
     expect(out).toMatchObject({
       code: 'OUTCOME_UNKNOWN',
       check_tool: 'botwallet_get_withdrawal',
@@ -606,7 +634,7 @@ describe('botwallet_withdraw', () => {
     sdk.frostSignComplete.mockRejectedValue(sentUnconfirmedError(id, 'withdrawal', `botwallet withdraw get ${id}`));
 
     const result = await confirmWithdrawal.handler({ transaction_id: id }, makeCtx(sdk));
-    const out = parse(result);
+    const out = parseResult(result);
     expect(result.isError).toBeUndefined();
     expect(out).toMatchObject({
       status: 'pending',
@@ -653,7 +681,7 @@ describe('x402 paid APIs', () => {
 
   async function probe(sdk: ReturnType<typeof fakeSdk>, fetchId: string) {
     sdk.x402Prepare.mockResolvedValue(preparedAnswer(fetchId));
-    const out = parse(await x402Fetch.handler({ url: API_URL }, makeCtx(sdk)));
+    const out = parseResult(await x402Fetch.handler({ url: API_URL }, makeCtx(sdk)));
     expect(out).toMatchObject({ payment_required: true, fetch_id: fetchId });
   }
 
@@ -684,7 +712,7 @@ describe('x402 paid APIs', () => {
       ]));
       sdk.x402Prepare.mockResolvedValue(preparedAnswer(fetchId));
 
-      const out = parse(await x402Fetch.handler({ url: API_URL }, makeCtx(sdk)));
+      const out = parseResult(await x402Fetch.handler({ url: API_URL }, makeCtx(sdk)));
       expect(out).toMatchObject({ payment_required: true, fetch_id: fetchId, url: API_URL });
       expect(sdk.x402Prepare).toHaveBeenCalledWith({
         url: API_URL, pay_to: MERCHANT, amount: '25000', network: 'solana', method: 'GET',
@@ -711,7 +739,7 @@ describe('x402 paid APIs', () => {
         { scheme: 'exact', network: 'solana', maxAmountRequired: '1000000', payTo: MERCHANT, asset: 'So11111111111111111111111111111111111111112' },
       ]));
 
-      const out = parse(await x402Fetch.handler({ url: API_URL }, makeCtx(sdk)));
+      const out = parseResult(await x402Fetch.handler({ url: API_URL }, makeCtx(sdk)));
       expect(out).toMatchObject({ payment_required: true, compatible: false, available_networks: ['solana'] });
       expect(out.error).toMatch(/USDC on Solana/);
       expect(sdk.x402Prepare).not.toHaveBeenCalled();
@@ -721,24 +749,60 @@ describe('x402 paid APIs', () => {
       const sdk = fakeSdk();
       stubApi(async () => Response.json({}));
 
-      const out = parse(await x402Fetch.handler({ url: 'http://api.example.com/data' }, makeCtx(sdk)));
+      const out = parseResult(await x402Fetch.handler({ url: 'http://api.example.com/data' }, makeCtx(sdk)));
       expect(out).toMatchObject({ payment_required: true, status: 402 });
       expect(out.error).toMatch(/HTTPS/);
       expect(sdk.x402Prepare).not.toHaveBeenCalled();
+    });
+
+    it('does not prepare a payment another host asks for after a redirect', async () => {
+      const sdk = fakeSdk();
+      const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+        if (url === API_URL) {
+          return new Response(null, { status: 302, headers: { location: 'https://pay.other.example/data' } });
+        }
+        return paymentRequired();
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const out = parseResult(await x402Fetch.handler(
+        { url: API_URL, headers: { Authorization: 'Bearer for-api-example-com' } }, makeCtx(sdk)));
+      expect(out).toMatchObject({ payment_required: true, status: 402, url: 'https://pay.other.example/data' });
+      expect(out.error).toMatch(/api\.example\.com redirected to another host, pay\.other\.example\. Nothing was prepared or paid/);
+      expect(out.error).toMatch(/probe its URL directly/);
+      expect(out.fetch_id).toBeUndefined();
+      expect(sdk.x402Prepare).not.toHaveBeenCalled();
+      // The probe itself kept the credential from the other host
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('authorization')).toBeNull();
+    });
+
+    it('still prepares a payment after a redirect on the same host', async () => {
+      const sdk = fakeSdk();
+      const fetchId = newId('fx');
+      vi.stubGlobal('fetch', vi.fn(async (url: string, _init?: RequestInit) => {
+        if (url === API_URL) return new Response(null, { status: 307, headers: { location: '/v2/data' } });
+        return paymentRequired();
+      }));
+      sdk.x402Prepare.mockResolvedValue(preparedAnswer(fetchId));
+
+      const out = parseResult(await x402Fetch.handler({ url: API_URL }, makeCtx(sdk)));
+      expect(out).toMatchObject({ payment_required: true, fetch_id: fetchId, url: 'https://api.example.com/v2/data' });
+      expect(sdk.x402Prepare).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://api.example.com/v2/data' }));
     });
 
     it('refuses to probe a local address', async () => {
       const fetchMock = stubApi(async () => Response.json({}));
       const result = await x402Fetch.handler({ url: 'http://169.254.169.254/latest/meta-data/' }, makeCtx(fakeSdk()));
       expect(result.isError).toBe(true);
-      expect(parse(result).message).toMatch(/private or local/);
+      expect(parseResult(result).message).toMatch(/private or local/);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('returns a free answer even when its JSON is broken', async () => {
       stubApi(async () => Response.json({}),
         () => new Response('{"broken":', { headers: { 'content-type': 'application/json' } }));
-      const out = parse(await x402Fetch.handler({ url: API_URL }, makeCtx(fakeSdk())));
+      const out = parseResult(await x402Fetch.handler({ url: API_URL }, makeCtx(fakeSdk())));
       expect(out).toMatchObject({ payment_required: false, status: 200, content: '{"broken":' });
     });
   });
@@ -751,7 +815,7 @@ describe('x402 paid APIs', () => {
       await probe(sdk, fetchId);
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(out).toMatchObject({ success: true, status: 200, fetch_id: fetchId });
       expect(out.content).toContain('42');
       expect(sdk.x402Settle).toHaveBeenCalledWith({ fetch_id: fetchId, success: true, response_status: 200 });
@@ -790,7 +854,7 @@ describe('x402 paid APIs', () => {
         fee_usdc: Number(fees.quoted) / 1e6,
       }));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(out).toMatchObject({ success: true, status: 200, fetch_id: fetchId });
       expect(sdk.x402SignComplete).toHaveBeenCalledTimes(1);
     });
@@ -799,10 +863,10 @@ describe('x402 paid APIs', () => {
       const sdk = fakeSdk();
       const fetchMock = stubApi(async () => Response.json({ answer: 42 }));
       sdk.x402Confirm.mockRejectedValue(
-        new BotWalletError('ALREADY_COMPLETED' as never, 'This x402 payment has already been completed'));
+        new BotWalletError('ALREADY_COMPLETED', 'This x402 payment has already been completed'));
 
       const result = await x402PayAndFetch.handler({ fetch_id: 'fx-done' }, makeCtx(sdk));
-      const out = parse(result);
+      const out = parseResult(result);
       expect(result.isError).toBeUndefined();
       expect(out).toMatchObject({ already_paid: true, fetch_id: 'fx-done' });
       expect(out.sent).toBeUndefined();
@@ -815,9 +879,9 @@ describe('x402 paid APIs', () => {
       const sdk = fakeSdk();
       const fetchMock = stubApi(async () => Response.json({ answer: 42 }));
       sdk.x402Confirm.mockRejectedValue(
-        new BotWalletError('TRANSACTION_FAILED' as never, 'This x402 payment previously failed', 'Create a new fetch'));
+        new BotWalletError('TRANSACTION_FAILED', 'This x402 payment previously failed', 'Create a new fetch'));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: 'fx-failed' }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: 'fx-failed' }, makeCtx(sdk)));
       expect(out).toMatchObject({ code: 'OUTCOME_UNKNOWN', fetch_id: 'fx-failed', check_tool: 'botwallet_balance' });
       expect(out.sent).toBeUndefined();
       expect(out.how_to_fix).toMatch(/two minutes/);
@@ -828,8 +892,8 @@ describe('x402 paid APIs', () => {
     it('says nothing was paid when the call is still waiting for approval', async () => {
       const sdk = fakeSdk();
       sdk.x402Confirm.mockRejectedValue(
-        new BotWalletError('AWAITING_APPROVAL' as never, 'This x402 payment is waiting for owner approval'));
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: 'fx-waiting' }, makeCtx(sdk)));
+        new BotWalletError('AWAITING_APPROVAL', 'This x402 payment is waiting for owner approval'));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: 'fx-waiting' }, makeCtx(sdk)));
       expect(out).toMatchObject({ code: 'AWAITING_APPROVAL', sent: false, fetch_id: 'fx-waiting' });
     });
 
@@ -839,14 +903,14 @@ describe('x402 paid APIs', () => {
       const fetchMock = stubApi(async () => Response.json({ answer: 42 }));
 
       sdk.x402Confirm.mockRejectedValueOnce(frozenError());
-      const atConfirm = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const atConfirm = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(atConfirm).toMatchObject({ code: 'WALLET_SUSPENDED', sent: false, fetch_id: fetchId });
       expect(atConfirm.how_to_fix).toMatch(/unfreeze/);
       expect(atConfirm.how_to_fix).toMatch(/botwallet_x402_pay_and_fetch again with the same fetch_id/);
 
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId));
       sdk.x402SignComplete.mockRejectedValueOnce(frozenError());
-      const atSigning = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const atSigning = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(atSigning).toMatchObject({ code: 'WALLET_SUSPENDED', sent: false, fetch_id: fetchId });
       expect(atSigning.how_to_fix).toMatch(/unfreeze/);
       expect(fetchMock).not.toHaveBeenCalled();
@@ -858,7 +922,7 @@ describe('x402 paid APIs', () => {
       const fetchMock = stubApi(async () => Response.json({ answer: 42 }));
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId, { url: 'http://api.example.com/data' }));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(out).toMatchObject({ sent: false, fetch_id: fetchId, transaction_id: fetchId });
       expect(out.message).toMatch(/HTTPS/);
       expect(sdk.frostSignInit).not.toHaveBeenCalled();
@@ -873,7 +937,7 @@ describe('x402 paid APIs', () => {
       await probe(sdk, fetchId);
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId, { toWallet: ATTACKER }));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(out).toMatchObject({ code: 'TRANSACTION_MISMATCH', sent: false, fetch_id: fetchId });
       expect(sdk.x402SignComplete).not.toHaveBeenCalled();
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -887,7 +951,7 @@ describe('x402 paid APIs', () => {
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId));
 
       const result = await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk));
-      const out = parse(result);
+      const out = parseResult(result);
       expect(result.isError).toBe(true);
       expect(out).toMatchObject({
         code: 'OUTCOME_UNKNOWN', fetch_id: fetchId, transaction_id: fetchId, check_tool: 'botwallet_balance',
@@ -907,7 +971,7 @@ describe('x402 paid APIs', () => {
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId));
       sdk.x402Settle.mockRejectedValue(new TimeoutError(30000));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(out).toMatchObject({ code: 'OUTCOME_UNKNOWN', fetch_id: fetchId, transaction_id: fetchId });
       expect(out.settle_error).toMatch(/could not record/);
       expect(out.how_to_fix).not.toMatch(/recorded this API call as failed/);
@@ -920,7 +984,7 @@ describe('x402 paid APIs', () => {
       await probe(sdk, fetchId);
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(out).toMatchObject({ success: true, content: '{"answer":', payment: { transaction_id: fetchId } });
       expect(sdk.x402Settle).toHaveBeenCalledWith({ fetch_id: fetchId, success: true, response_status: 200 });
     });
@@ -934,7 +998,7 @@ describe('x402 paid APIs', () => {
       await probe(sdk, fetchId);
       sdk.x402Confirm.mockImplementation(async () => x402ConfirmAnswer(fetchId));
 
-      const out = parse(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
+      const out = parseResult(await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk)));
       expect(out).toMatchObject({ success: false, status: 500, fetch_id: fetchId });
       expect(out.content).toContain('bad token');
       expect(out.next_steps).toMatch(/botwallet_balance/);
@@ -950,7 +1014,7 @@ describe('x402 paid APIs', () => {
       sdk.x402Settle.mockRejectedValue(new TimeoutError(30000));
 
       const result = await x402PayAndFetch.handler({ fetch_id: fetchId }, makeCtx(sdk));
-      const out = parse(result);
+      const out = parseResult(result);
       expect(result.isError).toBeUndefined();
       expect(out.content).toContain('42');
       expect(out.settle_error).toMatch(/Do not pay for this request again/);

@@ -24,7 +24,7 @@ const baseInfo = {
 
 // What the server answers for balance until a human owner claims the wallet
 const notClaimed = () => Promise.reject(new BotWalletError(
-  'WALLET_NOT_CLAIMED' as never,
+  'WALLET_NOT_CLAIMED',
   'This wallet has not been claimed by a human owner yet',
   'Ask your human owner to claim this wallet before you can use it',
   { claim_url: CLAIM_URL, claim_code: 'K7P2QX' },
@@ -59,14 +59,14 @@ describe('botwallet://status', () => {
     const sdk = mockSdk(async () => ({
       ...baseInfo,
       status: 'abandoned',
-      // The server sets is_claimed for every status but unclaimed
-      is_claimed: true,
+      // The server sets is_claimed only for an active or suspended wallet
+      is_claimed: false,
       balance: 12.5,
       abandoned: true,
       claim_url: CLAIM_URL,
       claim_code: 'K7P2QX',
     }), () => Promise.reject(new BotWalletError(
-      'WALLET_ABANDONED' as never, 'This wallet has been abandoned by its previous owner',
+      'WALLET_ABANDONED', 'This wallet has been abandoned by its previous owner',
     )));
 
     const text = await getWalletStatus(sdk, CONFIG);

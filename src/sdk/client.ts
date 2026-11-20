@@ -1,8 +1,8 @@
 // =============================================================================
-// Botwallet SDK Client
+// Botwallet API client
 // =============================================================================
-// AI-first SDK for autonomous agents to manage money.
-// Designed to be self-documenting and guide bots through operations.
+// The HTTP client the MCP tools call the Botwallet bot API with. It is part
+// of this package, not a published SDK. Port of packages/cli-go/api/client.go.
 // =============================================================================
 
 import {
@@ -105,43 +105,12 @@ import type {
 // Constants
 // -----------------------------------------------------------------------------
 
-// Default API URL
-// Override via:
-//   - BotWalletConfig.baseUrl (the MCP server passes resolveBaseUrl(): the
-//     BOTWALLET_API_URL or BOTWALLET_BASE_URL environment variable, then
-//     base_url in ~/.botwallet/config.json, as the CLI reads it)
-//   - BOTWALLET_API_URL environment variable
+// Used when BotWalletConfig.baseUrl is not set. The MCP server passes
+// resolveBaseUrl() (config/config.ts): BOTWALLET_API_URL or
+// BOTWALLET_BASE_URL, then base_url in ~/.botwallet/config.json, as the CLI
+// reads it.
 const DEFAULT_BASE_URL = 'https://api.botwallet.co/v1';
 const DEFAULT_TIMEOUT = 30000;
-
-/**
- * Guard-rail codes the API has used. Current servers also add a guard_rail
- * object to every guard-rail block, which handleApiError checks too; the
- * older names stay so replies from older servers keep their type.
- */
-const GUARD_RAIL_CODES = new Set([
-  // Sent today (withdrawals and paylinks). WALLET_SUSPENDED also answers
-  // (HTTP 403) every confirm and signing call while the owner has frozen the
-  // wallet, before anything changes.
-  'WALLET_SUSPENDED',
-  'ALLOW_WITHDRAWAL_REQUESTS',
-  'MAX_WITHDRAWAL',
-  'WITHDRAWAL_APPROVAL_REQUIRED',
-  'ALLOW_PAYLINKS',
-  'MAX_PAYLINK_AMOUNT',
-  // Older names
-  'DAILY_LIMIT',
-  'MAX_PER_TRANSACTION',
-  'ALLOW_BOT_PAYMENTS',
-  'BOT_WHITELIST',
-  'MERCHANT_BLACKLIST',
-  'MERCHANT_WHITELIST',
-  'ALLOW_WITHDRAWALS',
-  'MIN_WITHDRAWAL',
-  'WITHDRAWAL_WHITELIST',
-  'ALLOW_PAYMENT_REQUESTS',
-  'MAX_PAYMENT_REQUEST',
-]);
 
 /**
  * The next step for codes newer servers send, for a reply without a
@@ -178,25 +147,8 @@ function toAmount(value: unknown): number | undefined {
 // -----------------------------------------------------------------------------
 
 /**
- * BotWallet SDK Client
- * 
- * @example
- * ```typescript
- * import { BotWallet } from '@botwallet/sdk';
- * 
- * // Create client with API key
- * const wallet = new BotWallet({ apiKey: 'bw_bot_...' });
- * 
- * // Check balance
- * const balance = await wallet.balance();
- * console.log(`Balance: $${balance.balance}`);
- * 
- * // Make a payment
- * const result = await wallet.pay({ to: 'merchant-name', amount: 10.00 });
- * if (result.paid) {
- *   console.log(`Paid! New balance: $${result.new_balance}`);
- * }
- * ```
+ * One wallet's client for the Botwallet bot API. Each method is one API
+ * action; a failed call throws a BotWalletError (errors.ts).
  */
 export class BotWallet {
   private apiKey?: string;
@@ -204,38 +156,14 @@ export class BotWallet {
   private timeout: number;
 
   /**
-   * Create a BotWallet client.
-   * 
-   * API key can be provided via:
-   * 1. config.apiKey parameter
-   * 2. BOTWALLET_API_KEY environment variable (auto-detected)
-   * 
-   * @example
-   * ```typescript
-   * // With explicit API key
-   * const wallet = new BotWallet({ apiKey: 'bw_bot_...' });
-   * 
-   * // Auto-detect from environment (recommended for production)
-   * process.env.BOTWALLET_API_KEY = 'bw_bot_...';
-   * const wallet = new BotWallet();
-   * ```
+   * Takes its settings only from `config`: index.ts passes the API key and
+   * base URL that resolveWallet and resolveBaseUrl (config/config.ts) picked,
+   * so the environment is read in one place.
    */
   constructor(config: BotWalletConfig = {}) {
-    // Auto-detect API key from environment if not provided
-    this.apiKey = config.apiKey || this.detectApiKey();
-    this.baseUrl = config.baseUrl || process.env.BOTWALLET_API_URL || DEFAULT_BASE_URL;
+    this.apiKey = config.apiKey;
+    this.baseUrl = config.baseUrl || DEFAULT_BASE_URL;
     this.timeout = config.timeout || DEFAULT_TIMEOUT;
-  }
-
-  /**
-   * Detect API key from environment variables
-   */
-  private detectApiKey(): string | undefined {
-    // Check common environment variable names
-    if (typeof process !== 'undefined' && process.env) {
-      return process.env.BOTWALLET_API_KEY || process.env.BW_API_KEY;
-    }
-    return undefined;
   }
 
   // ---------------------------------------------------------------------------
@@ -276,7 +204,8 @@ export class BotWallet {
     // Build body
     const body = JSON.stringify({ action, ...data });
 
-    // Make request with timeout
+    // The timeout covers reading the reply as well as waiting for it, as
+    // http.Client.Timeout does in the CLI
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
@@ -288,51 +217,47 @@ export class BotWallet {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
-      const json = await response.json() as Record<string, unknown>;
+      const json = await response.json() as Record<string, unknown> | null;
 
       // V3 response format: { success: true/false, data: {...}, error: { code, message, how_to_fix } }
-      // Matches Go CLI's Call() in packages/cli-go/api/client.go
-      if ('success' in json) {
-        if (json.success === false) {
-          const errObj = (json.error || {}) as Record<string, unknown>;
-          throw this.handleApiError({
-            error: (errObj.code as string) || 'INTERNAL_ERROR',
-            message: (errObj.message as string) || 'Unknown error',
-            how_to_fix: errObj.how_to_fix as string | undefined,
-            ...Object.fromEntries(
-              Object.entries(errObj).filter(([k]) => !['code', 'message', 'how_to_fix'].includes(k))
-            ),
-          });
-        }
-        // Success: unwrap { success: true, data: {...} } → return data
-        if (json.data && typeof json.data === 'object') {
-          return json.data as T;
-        }
+      // Matches Go CLI's Call() in packages/cli-go/api/client.go, which refuses
+      // any other reply. Every bot action answers this way, so anything else
+      // came from a gateway or proxy on the way (a 502, for example), and it
+      // isn't known whether the action was carried out.
+      if (typeof json?.success !== 'boolean') {
+        throw new NetworkError(`Unexpected API response (HTTP ${response.status})`);
       }
-
-      // Fallback for non-V3 responses
-      if (!response.ok) {
-        throw this.handleApiError(json as ApiErrorResponse);
+      if (json.success === false) {
+        const errObj = (json.error || {}) as Record<string, unknown>;
+        throw this.handleApiError({
+          error: (errObj.code as string) || 'INTERNAL_ERROR',
+          message: (errObj.message as string) || 'Unknown error',
+          how_to_fix: errObj.how_to_fix as string | undefined,
+          ...Object.fromEntries(
+            Object.entries(errObj).filter(([k]) => !['code', 'message', 'how_to_fix'].includes(k))
+          ),
+        });
       }
-
+      // Success: unwrap { success: true, data: {...} } → return data
+      if (json.data && typeof json.data === 'object') {
+        return json.data as T;
+      }
       return json as T;
     } catch (error) {
-      clearTimeout(timeoutId);
-
       if (error instanceof BotWalletError) {
         throw error;
       }
 
       if (error instanceof Error) {
-        if (error.name === 'AbortError') {
+        if (error.name === 'AbortError' || error.name === 'TimeoutError') {
           throw new TimeoutError(this.timeout);
         }
         throw new NetworkError(error.message, error);
       }
 
       throw new NetworkError('Unknown error occurred');
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -363,9 +288,10 @@ export class BotWallet {
         );
 
       default: {
-        // Keep the server's how_to_fix: it tells the agent to ask the owner
+        // Every guard-rail block carries a guard_rail object (WALLET_SUSPENDED
+        // too). Keep the server's how_to_fix: it tells the agent to ask the owner.
         const guardRail = details.guard_rail;
-        if (GUARD_RAIL_CODES.has(error) || (typeof guardRail === 'object' && guardRail !== null)) {
+        if (typeof guardRail === 'object' && guardRail !== null) {
           return new GuardRailError(error.toLowerCase(), message, details, how_to_fix);
         }
         return BotWalletError.fromResponse(response);
@@ -383,13 +309,6 @@ export class BotWallet {
   setApiKey(apiKey: string): this {
     this.apiKey = apiKey;
     return this;
-  }
-
-  /**
-   * Check if client has an API key configured
-   */
-  hasApiKey(): boolean {
-    return !!this.apiKey;
   }
 
   /**
@@ -772,24 +691,4 @@ export class BotWallet {
   async walletImportKey(params: WalletImportKeyParams): Promise<WalletImportKeyResponse> {
     return this.request<WalletImportKeyResponse>('wallet_import_key', params, { requiresAuth: false });
   }
-
 }
-
-// -----------------------------------------------------------------------------
-// Factory Function
-// -----------------------------------------------------------------------------
-
-/**
- * Create a new BotWallet client
- * 
- * @example
- * ```typescript
- * import { createBotWallet } from '@botwallet/sdk';
- * 
- * const wallet = createBotWallet({ apiKey: 'bw_bot_...' });
- * ```
- */
-export function createBotWallet(config?: BotWalletConfig): BotWallet {
-  return new BotWallet(config);
-}
-

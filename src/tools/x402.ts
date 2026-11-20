@@ -1,24 +1,34 @@
 import { z } from 'zod';
 import type { ToolContext, ToolDefinition, ToolResult } from '../types.js';
 import { READ_ONLY, REACHES_OUT, MOVES_MONEY } from '../utils/annotations.js';
-import { BotWalletError, type X402ConfirmResponse, type X402SettleParams } from '../sdk/index.js';
-import { formatResult } from '../utils/format.js';
 import {
-  formatToolError,
-  guardRailBlockedError,
+  BotWalletError,
+  isFrozenWallet,
   isNoAnswer,
-  noSeedError,
-  notSentError,
-  outcomeUnknownError,
-  signingRefusedError,
-  type TransferRef,
-} from '../utils/errors.js';
+  type X402ConfirmResponse,
+  type X402SettleParams,
+} from '../sdk/index.js';
+import { formatResult } from '../utils/tool-result.js';
+import { errorMessage, noSeedError } from '../utils/errors.js';
 import { frostSignForX402, type SigningCheck } from '../frost/index.js';
 import { TransactionCheckError, usdToBaseUnits } from '../solana/index.js';
 import { loadSeed } from '../config/index.js';
-import { agreedTransferFor, forgetAgreedTransfer, rememberAgreedTransfer } from '../utils/agreed-transfers.js';
-import { expectedTransfer, localWalletAddress } from '../utils/signing-check.js';
-import { withSigningLock, SigningInProgressError } from '../utils/signing-lock.js';
+import {
+  agreedTransferFor,
+  alreadySigningError,
+  expectedTransfer,
+  forgetAgreedTransfer,
+  guardRailBlockedError,
+  localWalletAddress,
+  notSentError,
+  outcomeUnknownError,
+  rememberAgreedTransfer,
+  signingRefusedError,
+  unreadableConfigError,
+  withSigningLock,
+  SigningInProgressError,
+  type TransferRef,
+} from '../transfers/index.js';
 import {
   probeUrl,
   parse402Response,
@@ -26,32 +36,43 @@ import {
   availableNetworks,
   getAmount,
   normalizeSolanaNetwork,
+  checkAnsweringHost,
   requireHttps,
   checkPaidRequest,
   buildXPaymentHeader,
   fetchWithPayment,
   readResponseBody,
   displayBody,
+  searchCatalog,
   X402RequestError,
   type X402Requirements,
-} from '../utils/x402-client.js';
-import { USER_AGENT } from '../utils/user-agent.js';
+} from '../x402/index.js';
+import { defineTool } from './define.js';
 
-/** Same as the API client's default timeout. */
-const CATALOG_TIMEOUT_MS = 30_000;
+// Until the signed payment goes out in the API request, nothing is paid, and
+// the same fetch_id can be tried again: the server hands back the transaction
+// it already prepared instead of making a new one.
+const RETRY_SAME_FETCH =
+  'Nothing was paid. To try again, call botwallet_x402_pay_and_fetch with the same fetch_id. ' +
+  'Do not call botwallet_x402_fetch again for this request: that starts a new payment.';
 
-/** A failed catalog request as an error with a next step. `status` is 0 when no reply came. */
-function catalogError(e: unknown, status: number): BotWalletError {
-  if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
-    return new BotWalletError('TIMEOUT', `The x402 catalog did not answer within ${CATALOG_TIMEOUT_MS / 1000} seconds`, 'Try again in a moment.');
-  }
-  if (status) {
-    return new BotWalletError('NETWORK_ERROR', `The x402 catalog sent an unreadable reply (HTTP ${status})`, 'Try again in a moment.');
-  }
-  return new BotWalletError('NETWORK_ERROR', 'Could not reach the x402 catalog', 'Check your internet connection and try again.');
-}
+const REQUEST_REFUSED =
+  'Nothing was paid. If a header you passed is the problem, fix it and call botwallet_x402_pay_and_fetch ' +
+  'again with the same fetch_id. Botwallet pays only APIs at a public HTTPS address.';
 
-const x402Discover: ToolDefinition = {
+// The owner froze the wallet (WALLET_SUSPENDED): the server turns the call away
+// before anything changes, so the same fetch_id works once it is unfrozen.
+const UNFREEZE_THEN_RETRY =
+  'Nothing was paid. Ask your owner to unfreeze this wallet in the Botwallet dashboard, then call ' +
+  'botwallet_x402_pay_and_fetch again with the same fetch_id. Do not call botwallet_x402_fetch again for this ' +
+  'request: that starts a new payment.';
+
+// After a signed payment went to the API without a clear success
+const CHECK_BEFORE_PAYING_AGAIN =
+  'A payment the API has not taken can\'t go through after about two minutes. Wait that long, then check ' +
+  'botwallet_balance before paying for this request again: if the price has left the wallet, the API took the payment.';
+
+const x402Discover = defineTool({
   name: 'botwallet_x402_discover',
   annotations: READ_ONLY,
   description:
@@ -63,57 +84,20 @@ const x402Discover: ToolDefinition = {
     query: z.string().optional()
       .describe('Search query (e.g. "weather", "translation", "image generation")'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { query } = args as { query?: string };
+  async run(args, ctx) {
+    const entries = await searchCatalog(ctx.sdk.getBaseUrl(), args.query);
 
-      // x402_catalog is a public endpoint — no auth required
-      // SDK base URL is e.g. https://api.botwallet.co/v1, public is at /v1/public
-      const url = new URL(`${ctx.sdk.getBaseUrl()}/public`);
-      url.searchParams.set('action', 'x402_catalog');
-      if (query) url.searchParams.set('query', query);
-
-      // The timeout covers reading the reply as well as waiting for it
-      let status = 0;
-      let json: Record<string, unknown>;
-      try {
-        const res = await fetch(url.toString(), {
-          headers: { 'User-Agent': USER_AGENT },
-          signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
-        });
-        status = res.status;
-        json = await res.json() as Record<string, unknown>;
-      } catch (e) {
-        throw catalogError(e, status);
-      }
-
-      if (json.success === false) {
-        const err = json.error as Record<string, unknown> | undefined;
-        return formatToolError(new Error(
-          (err?.message as string) || 'Failed to query x402 catalog'
-        ));
-      }
-      if (status !== 200) {
-        throw new BotWalletError('NETWORK_ERROR', `The x402 catalog answered HTTP ${status}`, 'Try again in a moment.');
-      }
-
-      const data = (json.data || {}) as Record<string, unknown>;
-      const entries = (data.entries || []) as Array<Record<string, unknown>>;
-
-      return formatResult({
-        apis: entries,
-        count: entries.length,
-        message: entries.length === 0
-          ? 'No APIs found matching your query. Try a broader search term.'
-          : `Found ${entries.length} API(s). Use botwallet_x402_fetch to probe any URL.`,
-      });
-    } catch (e) {
-      return formatToolError(e);
-    }
+    return formatResult({
+      apis: entries,
+      count: entries.length,
+      message: entries.length === 0
+        ? 'No APIs found matching your query. Try a broader search term.'
+        : `Found ${entries.length} API(s). Use botwallet_x402_fetch to probe any URL.`,
+    });
   },
-};
+});
 
-const x402Fetch: ToolDefinition = {
+const x402Fetch = defineTool({
   name: 'botwallet_x402_fetch',
   // Not read-only: it calls the URL the agent gives and, for a paid API, prepares a payment
   annotations: REACHES_OUT,
@@ -137,124 +121,99 @@ const x402Fetch: ToolDefinition = {
     body: z.string().optional()
       .describe('Request body (for POST/PUT)'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { url, method = 'GET', headers, body } = args as {
-        url: string; method?: string; headers?: Record<string, string>; body?: string;
-      };
+  async run(args, ctx) {
+    const { url, method = 'GET', headers, body } = args;
 
-      // After redirects: the URL (and method) that answered is the one to pay
-      const probe = await probeUrl(url, method, headers, body);
-      const { response } = probe;
+    // After redirects: the URL (and method) that answered is the one to pay
+    const probe = await probeUrl(url, method, headers, body);
+    const { response } = probe;
 
-      // Free — return content directly
-      if (response.ok) {
-        const { text, truncated } = await readResponseBody(response);
+    // Free — return content directly
+    if (response.ok) {
+      const { text, truncated } = await readResponseBody(response);
+      return formatResult({
+        payment_required: false,
+        status: response.status,
+        content: displayBody(response.headers.get('content-type'), text),
+        ...(truncated ? { truncated: true } : {}),
+      });
+    }
+
+    // 402 Payment Required
+    if (response.status === 402) {
+      let requirements: X402Requirements;
+      try {
+        requirements = await parse402Response(response);
+      } catch (e) {
         return formatResult({
-          payment_required: false,
-          status: response.status,
-          content: displayBody(response.headers.get('content-type'), text),
-          ...(truncated ? { truncated: true } : {}),
+          payment_required: true,
+          status: 402,
+          error: `Could not parse x402 payment requirements: ${errorMessage(e)}`,
         });
       }
 
-      // 402 Payment Required
-      if (response.status === 402) {
-        let requirements: X402Requirements;
-        try {
-          requirements = await parse402Response(response);
-        } catch (e) {
-          return formatResult({
-            payment_required: true,
-            status: 402,
-            error: `Could not parse x402 payment requirements: ${(e as Error).message}`,
-          });
-        }
-
-        const solanaOption = findSolanaOption(requirements);
-        if (!solanaOption) {
-          return formatResult({
-            payment_required: true,
-            status: 402,
-            compatible: false,
-            error: 'This API offers no way to pay in USDC on Solana. Botwallet pays in USDC on Solana only.',
-            available_networks: availableNetworks(requirements),
-          });
-        }
-
-        // Refuse before anything is prepared or sent for approval
-        try {
-          requireHttps(probe.url);
-        } catch (e) {
-          return formatResult({
-            payment_required: true,
-            status: 402,
-            url: probe.url,
-            error: `Botwallet cannot pay this API: ${(e as Error).message}.`,
-          });
-        }
-
-        // Prepare payment intent via BotWallet API
-        const amount = getAmount(solanaOption);
-        const prepared = await ctx.sdk.x402Prepare({
-          url: probe.url,
-          pay_to: solanaOption.payTo,
-          amount,
-          network: normalizeSolanaNetwork(solanaOption.network),
-          method: probe.method,
-          asset: solanaOption.asset,
-          scheme: solanaOption.scheme,
-        });
-
-        // Key 1 later signs only the API's own price (base units, read the way
-        // the server's x402_prepare reads them) to the API's own address, for at
-        // most the quoted fee
-        const priceBaseUnits = Math.round(parseFloat(amount));
-        if (typeof prepared.fetch_id === 'string' && prepared.fetch_id &&
-            Number.isSafeInteger(priceBaseUnits) && priceBaseUnits > 0) {
-          rememberAgreedTransfer(prepared.fetch_id, {
-            amount: BigInt(priceBaseUnits),
-            recipient: solanaOption.payTo,
-            quotedFee: usdToBaseUnits(prepared.fee_usdc) ?? undefined,
-          });
-        }
-
-        // Owner approval needed — nothing is paid until the owner approves
-        // AND the agent comes back to call botwallet_x402_pay_and_fetch.
-        if (prepared.status === 'awaiting_approval') {
-          return formatResult({
-            payment_required: true,
-            needs_approval: true,
-            fetch_id: prepared.fetch_id,
-            approval_id: prepared.approval_id,
-            approval_url: prepared.approval_url,
-            message: prepared.message,
-            approval_reason: prepared.approval_reason,
-            price_usdc: prepared.amount_usdc,
-            fee_usdc: prepared.fee_usdc,
-            total_usdc: prepared.total_usdc,
-            pay_to: prepared.pay_to,
-            network: prepared.network,
-            url: probe.url,
-            description: solanaOption.description,
-            expires_at: prepared.expires_at,
-            next_steps: 'Send the approval_url to your human owner and tell them that approving does not pay for the API by itself. ' +
-              'Once they approve, call botwallet_x402_pay_and_fetch with the fetch_id. Approvals expire after 24 hours.',
-            confirm_tool: 'botwallet_x402_pay_and_fetch',
-            confirm_args: { fetch_id: prepared.fetch_id },
-            check_tool: 'botwallet_approval_status',
-            check_args: { approval_id: prepared.approval_id },
-          });
-        }
-
-        // Blocked by the owner's guard rails — surface the server's reason
-        if (prepared.status === 'rejected' || prepared.status === 'blocked') {
-          return guardRailBlockedError(prepared, 'API payment');
-        }
-
+      const solanaOption = findSolanaOption(requirements);
+      if (!solanaOption) {
         return formatResult({
           payment_required: true,
+          status: 402,
+          compatible: false,
+          error: 'This API offers no way to pay in USDC on Solana. Botwallet pays in USDC on Solana only.',
+          available_networks: availableNetworks(requirements),
+        });
+      }
+
+      // Refuse before anything is prepared or sent for approval. The caller
+      // chose the host it probed, and the headers it passes to
+      // botwallet_x402_pay_and_fetch are meant for that host
+      try {
+        checkAnsweringHost(url, probe.url);
+        requireHttps(probe.url);
+      } catch (e) {
+        return formatResult({
+          payment_required: true,
+          status: 402,
+          url: probe.url,
+          error: `Botwallet cannot pay this API: ${errorMessage(e)}.`,
+        });
+      }
+
+      // Prepare payment intent via BotWallet API
+      const amount = getAmount(solanaOption);
+      const prepared = await ctx.sdk.x402Prepare({
+        url: probe.url,
+        pay_to: solanaOption.payTo,
+        amount,
+        network: normalizeSolanaNetwork(solanaOption.network),
+        method: probe.method,
+        asset: solanaOption.asset,
+        scheme: solanaOption.scheme,
+      });
+
+      // Key 1 later signs only the API's own price (base units, read the way
+      // the server's x402_prepare reads them) to the API's own address, for at
+      // most the quoted fee
+      const priceBaseUnits = Math.round(parseFloat(amount));
+      if (typeof prepared.fetch_id === 'string' && prepared.fetch_id &&
+          Number.isSafeInteger(priceBaseUnits) && priceBaseUnits > 0) {
+        rememberAgreedTransfer(prepared.fetch_id, {
+          amount: BigInt(priceBaseUnits),
+          recipient: solanaOption.payTo,
+          quotedFee: usdToBaseUnits(prepared.fee_usdc) ?? undefined,
+        });
+      }
+
+      // Owner approval needed — nothing is paid until the owner approves
+      // AND the agent comes back to call botwallet_x402_pay_and_fetch.
+      if (prepared.status === 'awaiting_approval') {
+        return formatResult({
+          payment_required: true,
+          needs_approval: true,
           fetch_id: prepared.fetch_id,
+          approval_id: prepared.approval_id,
+          approval_url: prepared.approval_url,
+          message: prepared.message,
+          approval_reason: prepared.approval_reason,
           price_usdc: prepared.amount_usdc,
           fee_usdc: prepared.fee_usdc,
           total_usdc: prepared.total_usdc,
@@ -262,43 +221,43 @@ const x402Fetch: ToolDefinition = {
           network: prepared.network,
           url: probe.url,
           description: solanaOption.description,
-          next_steps: 'Call botwallet_x402_pay_and_fetch with the fetch_id to pay and get the API response.',
+          expires_at: prepared.expires_at,
+          next_steps: 'Send the approval_url to your human owner and tell them that approving does not pay for the API by itself. ' +
+            'Once they approve, call botwallet_x402_pay_and_fetch with the fetch_id. Approvals expire after 24 hours.',
+          confirm_tool: 'botwallet_x402_pay_and_fetch',
+          confirm_args: { fetch_id: prepared.fetch_id },
+          check_tool: 'botwallet_approval_status',
+          check_args: { approval_id: prepared.approval_id },
         });
       }
 
-      // Other error
+      // Blocked by the owner's guard rails — surface the server's reason
+      if (prepared.status === 'rejected' || prepared.status === 'blocked') {
+        return guardRailBlockedError(prepared, 'API payment');
+      }
+
       return formatResult({
-        payment_required: false,
-        status: response.status,
-        error: `HTTP ${response.status}: ${response.statusText}`,
+        payment_required: true,
+        fetch_id: prepared.fetch_id,
+        price_usdc: prepared.amount_usdc,
+        fee_usdc: prepared.fee_usdc,
+        total_usdc: prepared.total_usdc,
+        pay_to: prepared.pay_to,
+        network: prepared.network,
+        url: probe.url,
+        description: solanaOption.description,
+        next_steps: 'Call botwallet_x402_pay_and_fetch with the fetch_id to pay and get the API response.',
       });
-    } catch (e) {
-      return formatToolError(e);
     }
+
+    // Other error
+    return formatResult({
+      payment_required: false,
+      status: response.status,
+      error: `HTTP ${response.status}: ${response.statusText}`,
+    });
   },
-};
-
-// Until the signed payment goes out in the API request, nothing is paid, and
-// the same fetch_id can be tried again: the server hands back the transaction
-// it already prepared instead of making a new one.
-const RETRY_SAME_FETCH =
-  'Nothing was paid. To try again, call botwallet_x402_pay_and_fetch with the same fetch_id. ' +
-  'Do not call botwallet_x402_fetch again for this request: that starts a new payment.';
-
-const REQUEST_REFUSED =
-  'Nothing was paid. If a header you passed is the problem, fix it and call botwallet_x402_pay_and_fetch ' +
-  'again with the same fetch_id. Botwallet pays only APIs at a public HTTPS address.';
-
-// The owner froze the wallet (WALLET_SUSPENDED): the server turns the call away
-// before anything changes, so the same fetch_id works once it is unfrozen.
-const UNFREEZE_THEN_RETRY =
-  'Nothing was paid. Ask your owner to unfreeze this wallet in the Botwallet dashboard, then call ' +
-  'botwallet_x402_pay_and_fetch again with the same fetch_id. Do not call botwallet_x402_fetch again for this ' +
-  'request: that starts a new payment.';
-
-function isFrozenWallet(error: unknown): boolean {
-  return error instanceof BotWalletError && error.code === 'WALLET_SUSPENDED';
-}
+});
 
 async function payAndFetch(
   ctx: ToolContext,
@@ -314,6 +273,13 @@ async function payAndFetch(
     mnemonic = loadSeed(walletName);
   } catch (e) {
     return notSentError(e, ref);
+  }
+  // The same for the address Key 1 may sign for
+  let walletAddress: string | undefined;
+  try {
+    walletAddress = localWalletAddress(walletName);
+  } catch (e) {
+    return unreadableConfigError(e, ref, 'Then call botwallet_x402_pay_and_fetch again with the same fetch_id.');
   }
 
   // Step 1: Confirm payment — creates Solana transaction. Nothing is signed yet.
@@ -351,7 +317,7 @@ async function payAndFetch(
   let signedTx: string;
   try {
     const check: SigningCheck = {
-      walletAddress: localWalletAddress(walletName),
+      walletAddress,
       transfer: expectedTransfer('x402', confirmResult, agreedTransferFor(fetchId)),
     };
     const signResult = await frostSignForX402(ctx.sdk, mnemonic, transactionId, confirmResult.message, check);
@@ -374,9 +340,9 @@ async function payAndFetch(
     forgetAgreedTransfer(fetchId);
     // As the CLI does: record the failed call, so it doesn't stay pending
     const settleError = await settle(ctx, { fetch_id: fetchId, success: false, response_status: 0,
-      error_message: (e as Error).message.slice(0, 500) });
+      error_message: errorMessage(e).slice(0, 500) });
     return outcomeUnknownError(
-      `The signed payment was sent to the API, but no answer came back (${(e as Error).message}). ` +
+      `The signed payment was sent to the API, but no answer came back (${errorMessage(e)}). ` +
       'The API may still take the payment.',
       (settleError ? '' : 'Botwallet has recorded this API call as failed, so this fetch_id can\'t be used again. ') +
       CHECK_BEFORE_PAYING_AGAIN,
@@ -400,7 +366,7 @@ async function payAndFetch(
     content = displayBody(response.headers.get('content-type'), read.text);
     truncated = read.truncated;
   } catch (e) {
-    readError = `The API's answer could not be read in full (${(e as Error).message}).`;
+    readError = `The API's answer could not be read in full (${errorMessage(e)}).`;
   }
 
   // Step 4: Settle — report outcome back. Only the status goes to Botwallet,
@@ -434,11 +400,6 @@ async function payAndFetch(
   });
 }
 
-// After a signed payment went to the API without a clear success
-const CHECK_BEFORE_PAYING_AGAIN =
-  'A payment the API has not taken can\'t go through after about two minutes. Wait that long, then check ' +
-  'botwallet_balance before paying for this request again: if the price has left the wallet, the API took the payment.';
-
 /**
  * x402_confirm turned this fetch_id down. Most answers come before anything
  * was signed for it, but "completed" and "failed" are recorded after an
@@ -446,7 +407,7 @@ const CHECK_BEFORE_PAYING_AGAIN =
  * processed" may come after that too.
  */
 function confirmError(error: unknown, fetchId: string, ref: TransferRef): ToolResult {
-  const code = error instanceof BotWalletError ? (error.code as string) : '';
+  const code = error instanceof BotWalletError ? error.code : '';
   if (code === 'ALREADY_COMPLETED') {
     forgetAgreedTransfer(fetchId);
     return formatResult({
@@ -461,9 +422,9 @@ function confirmError(error: unknown, fetchId: string, ref: TransferRef): ToolRe
     if (code === 'TRANSACTION_FAILED') forgetAgreedTransfer(fetchId);
     return outcomeUnknownError(
       code === 'TRANSACTION_FAILED'
-        ? `Botwallet lists this API call as failed (${(error as Error).message}), so this fetch_id can't be used again. ` +
+        ? `Botwallet lists this API call as failed (${errorMessage(error)}), so this fetch_id can't be used again. ` +
           'If an earlier attempt sent the signed payment to the API, the API may still take it.'
-        : `Botwallet says this API payment is already being processed (${(error as Error).message}). It may have been paid.`,
+        : `Botwallet says this API payment is already being processed (${errorMessage(error)}). It may have been paid.`,
       CHECK_BEFORE_PAYING_AGAIN,
       ref,
       { check_tool: 'botwallet_balance', check_args: {} },
@@ -479,12 +440,12 @@ async function settle(ctx: ToolContext, params: X402SettleParams): Promise<strin
     await ctx.sdk.x402Settle(params);
     return undefined;
   } catch (e) {
-    return `Botwallet could not record the result of this call (${(e as Error).message}), so it may still ` +
+    return `Botwallet could not record the result of this call (${errorMessage(e)}), so it may still ` +
       'list the payment as pending. Do not pay for this request again until you know whether this payment went through.';
   }
 }
 
-const x402PayAndFetch: ToolDefinition = {
+const x402PayAndFetch = defineTool({
   name: 'botwallet_x402_pay_and_fetch',
   annotations: MOVES_MONEY,
   description:
@@ -503,30 +464,28 @@ const x402PayAndFetch: ToolDefinition = {
     body: z.string().optional()
       .describe('Request body for POST/PUT requests'),
   }),
-  async handler(args, ctx) {
+  async run(args, ctx) {
+    const walletName = ctx.config.walletName;
+    if (!ctx.config.hasSeed || !walletName) {
+      return noSeedError('make x402 payment (FROST signing)', walletName);
+    }
+
+    const { fetch_id, headers = {}, body } = args;
+
     try {
-      const walletName = ctx.config.walletName;
-      if (!ctx.config.hasSeed || !walletName) {
-        return noSeedError('make x402 payment (FROST signing)', walletName);
-      }
-
-      const { fetch_id, headers = {}, body } = args as {
-        fetch_id: string; headers?: Record<string, string>; body?: string;
-      };
-
       return await withSigningLock(fetch_id, () => payAndFetch(ctx, walletName, fetch_id, headers, body));
     } catch (e) {
       if (e instanceof SigningInProgressError) {
-        return outcomeUnknownError(
-          'This API payment is already being signed by another request.',
+        return alreadySigningError(
+          'API payment',
           'Wait for that request to finish. Do not call botwallet_x402_fetch again for this request.',
           { fetch_id: e.transactionId },
         );
       }
-      return formatToolError(e);
+      throw e;
     }
   },
-};
+});
 
 export const x402Tools: ToolDefinition[] = [
   x402Discover,

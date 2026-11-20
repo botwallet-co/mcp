@@ -15,7 +15,7 @@ export const UsernameSchema = z.string().trim().min(1).max(50)
 
 /**
  * Drop one leading '@' from a username, as the CLI does before every call
- * (stripAtPrefix in packages/cli-go/cmd/root.go). Usernames never start
+ * (stripAtPrefix in packages/cli-go/cmd). Usernames never start
  * with '@' and Solana addresses can't contain it, so an address is unchanged.
  * Case is left alone: Solana addresses are case-sensitive.
  */

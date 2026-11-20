@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../types.js';
 import { READ_ONLY, CREATES, REACHES_OUT, CANNOT_UNDO } from '../utils/annotations.js';
-import { formatResult } from '../utils/format.js';
-import { formatToolError } from '../utils/errors.js';
+import { formatResult, formatToolError } from '../utils/tool-result.js';
 import { AmountSchema, PaginationSchema } from '../utils/schemas.js';
+import { apiTool, defineTool } from './define.js';
 
 const LineItemSchema = z.object({
   description: z.string().describe('Line item description'),
@@ -12,7 +12,7 @@ const LineItemSchema = z.object({
   total_cents: z.number().int().min(1).describe('Total in cents (unit_price_cents * quantity)'),
 });
 
-const createPaylink: ToolDefinition = {
+const createPaylink = defineTool({
   name: 'botwallet_create_paylink',
   annotations: CREATES,
   description:
@@ -34,43 +34,36 @@ const createPaylink: ToolDefinition = {
     items: z.array(LineItemSchema).optional()
       .describe('Itemized invoice line items. Total is auto-calculated from items.'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { amount, description, reference, expires_in, reveal_owner, items } = args as {
-        amount?: number; description: string; reference?: string; expires_in?: string;
-        reveal_owner?: boolean; items?: Array<{ description: string; unit_price_cents: number; quantity: number; total_cents: number }>;
-      };
+  async run(args, ctx) {
+    const { amount, description, reference, expires_in, reveal_owner, items } = args;
 
-      if (!amount && (!items || items.length === 0)) {
-        return formatToolError(new Error(
-          'Either amount or items must be provided. Use items for itemized invoices, or amount for a simple paylink.'
-        ));
-      }
-
-      // Auto-calculate amount from items when not explicitly provided
-      let finalAmount = amount;
-      if (!finalAmount && items && items.length > 0) {
-        const totalCents = items.reduce((sum, item) => sum + item.total_cents, 0);
-        finalAmount = totalCents / 100;
-      }
-
-      const result = await ctx.sdk.createPaymentRequest({
-        // Always set by here: the guard above requires amount or a non-empty items list
-        amount: finalAmount as number,
-        description,
-        reference,
-        expires_in,
-        reveal_owner,
-        line_items: items,
-      });
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
+    if (!amount && (!items || items.length === 0)) {
+      return formatToolError(new Error(
+        'Either amount or items must be provided. Use items for itemized invoices, or amount for a simple paylink.'
+      ));
     }
-  },
-};
 
-const sendPaylink: ToolDefinition = {
+    // Auto-calculate amount from items when not explicitly provided
+    let finalAmount = amount;
+    if (!finalAmount && items && items.length > 0) {
+      const totalCents = items.reduce((sum, item) => sum + item.total_cents, 0);
+      finalAmount = totalCents / 100;
+    }
+
+    const result = await ctx.sdk.createPaymentRequest({
+      // Always set by here: the guard above requires amount or a non-empty items list
+      amount: finalAmount as number,
+      description,
+      reference,
+      expires_in,
+      reveal_owner,
+      line_items: items,
+    });
+    return formatResult(result);
+  },
+});
+
+const sendPaylink = apiTool({
   name: 'botwallet_send_paylink',
   annotations: REACHES_OUT,
   description:
@@ -86,19 +79,10 @@ const sendPaylink: ToolDefinition = {
     message: z.string().max(500).optional()
       .describe('Optional message to include'),
   }),
-  async handler(args, ctx) {
-    try {
-      const result = await ctx.sdk.sendPaylinkInvitation(args as {
-        request_id: string; to_email?: string; to_wallet?: string; message?: string;
-      });
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  call: (sdk, args) => sdk.sendPaylinkInvitation(args),
+});
 
-const getPaylink: ToolDefinition = {
+const getPaylink = apiTool({
   name: 'botwallet_get_paylink',
   annotations: READ_ONLY,
   description: 'Get the status of a payment request by ID or reference. Shows if it has been paid.',
@@ -108,25 +92,10 @@ const getPaylink: ToolDefinition = {
     reference: z.string().optional()
       .describe('Your internal reference'),
   }),
-  async handler(args, ctx) {
-    try {
-      const result = await ctx.sdk.getPaymentRequest(args as {
-        request_id?: string; reference?: string;
-      });
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
-
-// Status values must match ListPaymentRequestsParams['status'] — tsc enforces this via z.infer below
-const ListPaylinksSchema = PaginationSchema.extend({
-  status: z.enum(['pending', 'completed', 'expired', 'cancelled', 'all']).optional()
-    .describe('Filter by status (default: all)'),
+  call: (sdk, args) => sdk.getPaymentRequest(args),
 });
 
-const listPaylinks: ToolDefinition = {
+const listPaylinks = apiTool({
   name: 'botwallet_list_paylinks',
   annotations: READ_ONLY,
   description:
@@ -134,34 +103,23 @@ const listPaylinks: ToolDefinition = {
     'Filter by status to find pending, completed, or expired paylinks. ' +
     'For payments you SENT (outgoing), use botwallet_list_payments. ' +
     'For all money movements, use botwallet_transactions.',
-  inputSchema: ListPaylinksSchema,
-  async handler(args, ctx) {
-    try {
-      const result = await ctx.sdk.listPaymentRequests(args as z.infer<typeof ListPaylinksSchema>);
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  // Status values must match ListPaymentRequestsParams['status']: tsc checks it at the call below
+  inputSchema: PaginationSchema.extend({
+    status: z.enum(['pending', 'completed', 'expired', 'cancelled', 'all']).optional()
+      .describe('Filter by status (default: all)'),
+  }),
+  call: (sdk, args) => sdk.listPaymentRequests(args),
+});
 
-const cancelPaylink: ToolDefinition = {
+const cancelPaylink = apiTool({
   name: 'botwallet_cancel_paylink',
   annotations: CANNOT_UNDO,
   description: 'Cancel a pending payment request. Only pending paylinks can be cancelled — paid or expired paylinks cannot.',
   inputSchema: z.object({
     request_id: z.string().describe('Payment request ID to cancel'),
   }),
-  async handler(args, ctx) {
-    try {
-      const { request_id } = args as { request_id: string };
-      const result = await ctx.sdk.cancelPaymentRequest({ request_id });
-      return formatResult(result);
-    } catch (e) {
-      return formatToolError(e);
-    }
-  },
-};
+  call: (sdk, { request_id }) => sdk.cancelPaymentRequest({ request_id }),
+});
 
 export const earningTools: ToolDefinition[] = [
   createPaylink,

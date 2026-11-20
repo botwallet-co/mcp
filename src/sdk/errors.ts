@@ -2,21 +2,25 @@
 // Botwallet SDK Errors
 // =============================================================================
 
-import type { BotWalletErrorCode, ApiErrorResponse } from './types.js';
+import type { ApiErrorResponse } from './types.js';
 
 /**
  * Base error class for all BotWallet errors
  */
 export class BotWalletError extends Error {
-  /** Machine-readable error code */
-  readonly code: BotWalletErrorCode;
+  /**
+   * Machine-readable error code: the API's own (it adds codes over time; the
+   * ones the tools react to are checked in error-codes.ts) or this client's
+   * (NETWORK_ERROR, TIMEOUT).
+   */
+  readonly code: string;
   /** Suggested fix (when available) */
   readonly howToFix?: string;
   /** Additional error details */
   readonly details?: Record<string, unknown>;
 
   constructor(
-    code: BotWalletErrorCode,
+    code: string,
     message: string,
     howToFix?: string,
     details?: Record<string, unknown>
@@ -39,7 +43,7 @@ export class BotWalletError extends Error {
   static fromResponse(response: ApiErrorResponse): BotWalletError {
     const { error, message, how_to_fix, ...rest } = response;
     return new BotWalletError(
-      error as BotWalletErrorCode,
+      error,
       message,
       how_to_fix,
       Object.keys(rest).length > 0 ? rest : undefined
@@ -195,7 +199,7 @@ export class GuardRailError extends BotWalletError {
    * @param howToFix - The API's next step for the agent, kept as it is
    */
   constructor(guardRail: string, message: string, details?: Record<string, unknown>, howToFix?: string) {
-    super(guardRail.toUpperCase() as BotWalletErrorCode, message, howToFix, details);
+    super(guardRail.toUpperCase(), message, howToFix, details);
     this.name = 'GuardRailError';
     this.guardRail = guardRail;
   }
